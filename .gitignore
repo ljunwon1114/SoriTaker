@@ -1,0 +1,44 @@
+# Python and development environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local credentials and settings
+.env
+.env.*
+!.env.example
+settings.json
+
+# Build outputs and generated distribution archives
+/build/
+/dist/
+/installation/
+*.egg-info/
+*.app/
+*.dmg
+*.zip
+
+# Downloaded models, recordings, transcripts, and processing state
+/models/
+/recordings/
+/notes/
+/jobs/
+/logs/
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.mp4
+*.mov
+*.safetensors
+*.onnx
+*.npz
+*.log
+
+# macOS metadata
+.DS_Store
+._*

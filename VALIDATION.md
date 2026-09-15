@@ -1,0 +1,32 @@
+# Validation scope
+
+Environment: Linux x86_64, Python 3.12.14. The target Mac is Apple Silicon M3 with 16GB RAM, macOS 14+.
+
+Completed:
+
+- Python source compilation and installer Bash syntax checks.
+- Version 0.3.4 icon: generated with the built-in image tool, copied as an RGBA PNG, and packaged as a multi-resolution macOS ICNS file. The source image has transparent outer corners; all ICNS representations were decoded, and Qt loaded the PNG successfully. Installer simulations verify that both assets reach the build source. Actual Finder/Dock rendering requires the native Mac build.
+- Version 0.3.3 language audit: app-owned setup/update messages, diagnostic messages, Python comments/docstrings, and documentation are English. Only the Korean language-selector label uses Korean in user-interface text. Korean test data continues to exercise Unicode handling. Installer/update control-flow simulations and all 43 tests passed after the rename and download fix.
+- Dependency resolution for Python 3.12 / macOS 14 / arm64 completed successfully; requirements-macos.lock records the resolved versions.
+- 43 automated tests: the original 35 checks cover record-popup acceptance/cancellation; Stop starts no worker; audio-only GUI and worker paths bypass models and conversion; exact audio copying and collision handling; failed-copy cleanup; invalid names; scoped discard; imported originals and symlinked folders preserved; discard confirmation and UI reset; eight sentence-format checks; three mid-recording option checks.
+- Five download regressions cover legacy flag cleanup without forcing a new mode, GUI subprocess environment isolation, and real downloads through the pinned huggingface-hub 0.34.4 client. Fresh worker and --prepare processes start with HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1, then successfully obtain small fixture files from a local HTTP server and write the installed-model manifest. This exercises download mechanics, not a full 3.1 GB model download.
+- Three storage regressions verify reuse of legacy SoriNote data, new-install SoriTaker paths, and backward-compatible data-directory environment overrides. Python environments and model files are not moved by the rename.
+- The pinned mlx-whisper 0.4.3 loader was inspected: an existing local model path bypasses snapshot_download. The worker checks local model availability first and reports missing models without initiating a download. No forced offline environment setting is needed for this path.
+- Mid-recording checks: options remain available during recording and pause; changing language/model/speakers/hints preserves recorder identity, microphone and accepted audio; the saved job uses the latest settings; rejecting options preserves prior settings and pause state; downloads/workers cannot start while recording. Hardware microphone capture is not exercised in these tests.
+- Sentence checks cover joining decoder fragments; separate sentence timestamps from complete word alignment; Korean spacing; abbreviations and decimals; preserving speaker changes/long pauses; preserving edits when alignment is incomplete; retaining ellipses; and clean single-speaker TXT. Popup acceptance verifies lecture mode disables diarization.
+- A real GUI-launched subprocess saved audio only with no installed models, produced one byte-identical WAV and no TXT, removed its temporary recording, and displayed the saved state.
+- Update.command reuses the existing installation without downloads: existing build environment reused, package installation and model preparation skipped, rebuilt app checked before replacement, previous app backed up. Shell syntax checked; actual macOS rebuilding is not executable in this Linux environment.
+- Nine update-script scenarios passed with simulated macOS build commands: SoriNote-to-SoriTaker updates, existing SoriTaker updates, and subsequent updates that still use the legacy data folder. Each covers success, build failure, and failure while publishing the replacement. Existing apps are backed up or restored, stored audio/models remain intact, no package/model downloads occur, and app launch receives no inherited offline flags. Reproduce with `python3 tests/check_update_script.py`; these are control-flow checks, not a native Mac build.
+- The renamed SoriTaker save screen, recording-settings popup, and Options window were launched and visually inspected. preview.png and preview-recording.png are UI examples, not transcription accuracy results.
+- Actual MLX/Whisper transcription was also run offline on CPU with the tiny model and the upstream JFK sample; text and 22 word timestamps were returned. This verifies the transcription integration, not large-v3/turbo performance on M3.
+- Actual sherpa-onnx diarization on the upstream 56.9-second four-speaker sample: 10 turns, four distinct speaker labels with the known speaker count specified. This verifies engine integration only, not Korean/English diarization accuracy.
+
+Not verified here:
+
+- macOS build and app notarization: the installer builds and ad-hoc signs on the user's Mac; no commercial signing certificate is supplied.
+- M3/Metal performance, microphone authorization and hardware capture/playback.
+- Accuracy on the user's Korean/English recordings or comparison with CLOVA Note.
+- Sentence formatting and lecture mode do not validate or repair recognition errors. No large-model accuracy improvement is claimed without evaluation against reference transcripts and the original audio.
+- Full large-v3/turbo performance: the installer includes an app-side model/GPU load check.
+
+The updated app must still be built and checked on the target Mac. Any failure is written to the logs described in README.md.

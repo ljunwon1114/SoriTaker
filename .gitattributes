@@ -1,0 +1,7 @@
+* text=auto
+*.command text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.spec text eol=lf
+*.png binary
+*.icns binary
