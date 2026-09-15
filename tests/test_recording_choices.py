@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
 from core import (ensure_dirs, new_note, note_dir, save_note, atomic_json,
                   read_json, save_audio_output, discard_pending)
 import gui
+import job_queue
 import worker
 
 
@@ -130,7 +131,13 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
 
     def tearDown(self):
         self.window.recording = None
-        self.window.proc = None
+        self.window.queue.proc = None
+        if self.window.queue.log:
+            self.window.queue.log.close()
+            self.window.queue.log = None
+        for item in self.window.queue.items:
+            if item['state'] in job_queue.ACTIVE:
+                item['state']='cancelled'
         self.window.close()
         self.window.deleteLater()
         super().tearDown()
@@ -221,24 +228,24 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         with patch.object(self.window,'start_job') as start_job:
             dialog.download('large')
             start_job.assert_not_called()
-        with patch.object(gui.subprocess,'Popen') as process:
+        with patch.object(job_queue.subprocess,'Popen') as process:
             self.window.start_job(dict(kind='download',model='large'))
             process.assert_not_called()
-        self.assertIsNone(self.window.proc)
+        self.assertIsNone(self.window.queue.proc)
         dialog.close()
 
     def test_gui_download_clears_legacy_flags_without_changing_parent(self):
         with patch.dict(os.environ,{'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}), \
-             patch.object(gui.subprocess,'Popen') as process:
+             patch.object(job_queue.subprocess,'Popen') as process:
             self.window.start_job(dict(kind='download',model='large'))
             env=process.call_args.kwargs['env']
             self.assertNotIn('HF_HUB_OFFLINE',env)
             self.assertNotIn('TRANSFORMERS_OFFLINE',env)
             self.assertEqual(os.environ['HF_HUB_OFFLINE'],'1')
             self.assertEqual(os.environ['TRANSFORMERS_OFFLINE'],'1')
-        self.window.job_log.close()
-        self.window.job_log=None
-        self.window.proc=None
+        self.window.queue.log.close()
+        self.window.queue.log=None
+        self.window.queue.proc=None
 
     def test_stop_offers_choices_without_starting_any_worker(self):
         rec = Mock(path=self.source, duration=2, error='')

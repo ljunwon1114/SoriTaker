@@ -7,13 +7,15 @@ Record, pause, choose what to keep, and save audio with an optional Korean or
 English transcript. The interface, installer messages, diagnostics, and developer
 documentation are in English. The Korean language option uses its native label.
 
-**Version: 0.3.4 · Early personal-use release**
+**Version: 0.4.0 · Early personal-use release**
 
 ![SoriTaker save screen](preview.png)
 
 ## Features
 
 - Record from your microphone with Pause, Resume, and Stop controls.
+- Start another recording while earlier audio is transcribed in the background.
+- See waiting, processing, saved, and failed tasks in a persistent queue.
 - Choose language, model, and speaker mode before recording.
 - Change transcription settings during recording, while paused, or after Stop.
 - Save audio only, save audio with a TXT transcript, or discard the current task.
@@ -23,7 +25,8 @@ documentation are in English. The Korean language option uses its native label.
 - Run transcription locally after downloading the selected models once.
 
 There is no account requirement or monthly usage quota in the app. Transcription
-starts when you choose to save a transcript; it does not run while recording.
+is queued when you choose to save a transcript. An earlier recording can be
+transcribed while you capture the next one; model workers run one at a time.
 
 ## Requirements
 
@@ -55,7 +58,7 @@ checks completed in development and native Mac behavior that still needs testing
    dependencies, downloads the Fast and speaker-label models, and builds the app.
 5. The app opens from `~/Applications/SoriTaker.app`. Keep it in the Dock if desired.
 
-If you received the separately packaged `SoriTaker_M3.zip`, its folder is named
+If you received the separately packaged `SoriTaker.zip`, its folder is named
 `SoriTaker` instead. The drag-and-drop command works with either package, including
 folders renamed by Finder when a previous download already exists.
 
@@ -78,7 +81,7 @@ self-check fails, the installer logs the failure and keeps the existing app.
    bash "$HOME/Downloads/SoriTaker-main/Update.command"
    ```
 
-For `SoriTaker_M3.zip`, use its `SoriTaker` folder instead. Always use the newly
+For `SoriTaker.zip`, use its `SoriTaker` folder instead. Always use the newly
 downloaded update script, rather than one left in an older extracted folder.
 
 The update reuses the existing Python environment, libraries, and models. It
@@ -107,10 +110,11 @@ folder. The old app is backed up only after the new build passes its checks.
 3. Click **Stop**. Transcription does not start automatically.
 4. Use **Choose…** to pick a destination folder and edit the file name.
 5. Choose **Save as**, then click **Save**:
-   - **Audio + transcript (.txt)** transcribes locally and saves both files.
-   - **Audio only (no transcription)** copies the original file without loading
+   - **Audio + transcript (.txt)** queues local transcription and saves both files.
+   - **Audio only (no transcription)** queues a copy of the original file without loading
      a model, transcribing, or converting its format. No models are required.
-6. Use **Open folder** to view the saved files.
+6. Start the next recording immediately. Select a completed task in **Queue**
+   and click **Open folder** to view its saved files.
 
 Example output from a microphone recording:
 
@@ -132,8 +136,41 @@ and its temporary transcript and work files. Other recordings and already saved
 results are preserved. For an imported file, Discard removes app-owned work and
 keeps the external original. Discard disappears after a successful save.
 
-You can cancel transcription, then save audio only, retry transcription, or
-discard the current task. The original audio is preserved when cancelling.
+Select a waiting or processing task in **Queue** and click **Cancel task** to stop
+that task. Cancellation preserves its audio and does not stop a new recording.
+Use **Retry** to run the same task again, or **Use audio** to bring the recording
+back to the save form and choose audio-only saving or different settings.
+
+## Background queue
+
+![Recording while previous tasks are queued](preview-queue.png)
+
+Each press of **Save** adds one task with its own audio source, output filename,
+destination, language, model, speaker mode, and vocabulary hints. Those settings
+are fixed for that task. Changing Options or the save folder for a later recording
+does not change jobs already in the queue.
+
+The recording screen becomes available as soon as the task is queued. Press
+**Record** to start the next recording, even while an earlier task is processing.
+Transcription and model-download workers run sequentially to limit memory usage;
+waiting tasks start automatically, including while the microphone is recording.
+Audio-only saves also use the queue and do not load a model.
+
+The queue shows each task's status, waiting position, and reported progress.
+Select a task to see its message. **Open folder** opens completed output files'
+folder, or the job folder when investigating an unfinished task. **Cancel task**
+affects only the selected task. A failure stays visible without a popup interrupting
+the next recording, and the next waiting task can continue.
+
+**Retry** puts a failed, cancelled, or interrupted task at the back of the queue
+with its saved settings. **Use audio** returns its source to the save form while
+recording is stopped, so you can change the model or save only the audio.
+
+Closing the app asks before stopping capture and active work. Waiting tasks remain
+on disk and resume on the next launch. An interrupted task is kept for manual retry;
+its unfinished transcription restarts from the beginning. A stored completion
+receipt prevents a task that already finished saving from being exported again.
+Hardware recording quality while using the GPU still needs testing on your Mac.
 
 ## Settings
 
@@ -141,12 +178,13 @@ discard the current task. The original audio is preserved when cancelling.
 
 **Options** stays available during recording, while paused, and after Stop.
 Change the language, model, speaker settings, or vocabulary hints, then click
-**Done**. The settings in effect when you press **Save** apply to the entire
-recording. Initial choices in the recording dialog can be changed later.
+**Done**. The settings in effect when you press **Save** apply to that entire
+recording. Initial choices in the recording dialog can be changed later, and
+Options can be edited while a previous recording is being transcribed.
 
 Opening Options preserves the current recording or pause state. The microphone
 is fixed during recording. Microphone changes and model downloads are available
-after Stop. Settings are locked once a processing job starts.
+after Stop. Settings already captured by a queued task remain fixed.
 
 | Setting | Behavior |
 | --- | --- |
@@ -191,14 +229,17 @@ For a fresh installation, unsaved recordings are kept at:
 
 Upgrades from SoriNote continue using the same paths under `SoriNote/`.
 
-On relaunch, the app recovers the most recent unsaved recording. Use **Import
-audio** to open other recordings from that folder. Successful saves clean up the
-corresponding temporary recording and work files. External originals are preserved.
+On relaunch, the app recovers the most recent unqueued recording. Use **Import
+audio** to open other recordings from that folder. Queued microphone recordings
+move into their own `jobs/<id>/recording.wav` files so a later recording cannot
+replace or discard them. Failed and cancelled tasks keep their audio there.
+Successful saves clean up only that task's temporary recording and working files.
+External imported originals are preserved.
 
 | Data | Location |
 | --- | --- |
 | Installation logs and app checks | `~/Library/Application Support/SoriTaker/logs/` |
-| Processing logs | `~/Library/Application Support/SoriTaker/jobs/` |
+| Queue state, queued audio, and processing logs | `~/Library/Application Support/SoriTaker/jobs/` |
 | Local models | `~/Library/Application Support/SoriTaker/models/` |
 
 If recording fails, check **System Settings → Privacy & Security → Microphone**
@@ -241,6 +282,11 @@ limitations. Code comments and documentation are in English; Korean test fixture
 exercise Unicode text and Korean transcription handling.
 
 ## Recent changes
+
+- **0.4.0:** Record new audio while prior tasks are processed. Add a persistent
+  serial queue with status, cancellation, retry, audio recovery, and output-folder
+  access. Freeze settings per task and isolate temporary audio and cleanup.
+  Use general Apple Silicon descriptions and the package name `SoriTaker.zip`.
 
 - **0.3.4:** Add a teal rounded-square app icon combining a written note with a
   sound waveform. Include the macOS ICNS icon and the GUI PNG in installation

@@ -9,7 +9,7 @@ import subprocess
 import time
 import traceback
 from pathlib import Path
-from core import (atomic_json, read_json, note_dir, save_note, label_segments,
+from core import (ensure_dirs, atomic_json, read_json, note_dir, save_note, label_segments,
                   save_outputs, save_audio_output, discard_pending)
 from models import model_dir, ready, install, clear_legacy_offline_flags
 
@@ -20,7 +20,10 @@ class Reporter:
         self.last = 0.0
 
     def update(self, message, progress=None, state='running', **extra):
-        atomic_json(self.path, dict(message=message, progress=progress, state=state, **extra))
+        value = dict(message=message, progress=progress, state=state, **extra)
+        if state == 'complete' and read_json(self.path.parent/'job.json', {}).get('queue_managed'):
+            atomic_json(self.path.parent/'result.json', value)
+        atomic_json(self.path, value)
 
 
 class ASRProgress(io.TextIOBase):
@@ -109,6 +112,33 @@ def diarize(audio, speakers, reporter):
 
 def run_job(spec_path):
     spec_file = Path(spec_path)
+    spec = read_json(spec_file, {})
+    if not spec.get('queue_managed'):
+        return _run_job(spec_path)
+    reporter = Reporter(spec_file.parent)
+    try:
+        # Also serializes a worker left alive after an unexpected GUI shutdown.
+        # No model is imported until the previous worker releases this OS lock.
+        import fcntl
+        with (ensure_dirs()/'processing.lock').open('a') as lock:
+            reporter.update('Waiting for the previous worker…')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = read_json(spec_file.parent/'result.json', {})
+            if result.get('state') == 'complete':
+                atomic_json(reporter.path, result)
+                return 0
+            return _run_job(spec_path)
+    except Exception as exc:
+        result = read_json(spec_file.parent/'result.json', {})
+        if result.get('state') == 'complete':
+            atomic_json(reporter.path, result)
+            return 0
+        reporter.update(str(exc), state='error')
+        return 1
+
+
+def _run_job(spec_path):
+    spec_file = Path(spec_path)
     reporter = Reporter(spec_file.parent)
     spec = read_json(spec_file)
     if not spec:
@@ -128,10 +158,11 @@ def run_job(spec_path):
             saved_paths = save_audio_output(source, Path(spec['export_folder']), spec['export_name'])
             reporter.update('Audio saved. No transcript was created.', 100, state='complete',
                             saved_paths=saved_paths)
-            try:
-                discard_pending(str(source), keep_job=spec_file.parent)
-            except OSError:
-                pass  # Saving succeeded; remaining temporary data is recoverable.
+            if not spec.get('queue_managed'):
+                try:
+                    discard_pending(str(source), keep_job=spec_file.parent)
+                except OSError:
+                    pass  # Saving succeeded; remaining temporary data is recoverable.
             return 0
         if spec['kind'] != 'transcribe':
             raise ValueError('Unknown job type')
@@ -221,7 +252,7 @@ def run_job(spec_path):
         reporter.update('Audio and transcript saved.' if saved_paths else 'Transcript is ready.',
                         100, state='complete', note_id=note['id'], saved_paths=saved_paths,
                         warnings=note.get('warnings', []))
-        if saved_paths:
+        if saved_paths and not spec.get('queue_managed'):
             # Clean current and previous attempts only after both files are committed.
             try:
                 discard_pending(str(source), keep_job=spec_file.parent)
@@ -229,7 +260,8 @@ def run_job(spec_path):
                 pass
         return 0
     except Exception as exc:
-        if read_json(reporter.path, {}).get('state') == 'complete':
+        if (read_json(reporter.path, {}).get('state') == 'complete' or
+                read_json(spec_file.parent/'result.json', {}).get('state') == 'complete'):
             return 0  # Cancellation during cleanup must not undo a committed save.
         (spec_file.parent / 'error.log').write_text(traceback.format_exc(), encoding='utf-8')
         if spec.get('kind') == 'transcribe':

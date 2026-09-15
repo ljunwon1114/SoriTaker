@@ -1,8 +1,5 @@
 from __future__ import annotations
-import os
 import queue
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -15,9 +12,10 @@ from PySide6.QtCore import Qt, QTimer, QUrl, QLockFile
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QIcon
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QCheckBox, QSpinBox, QFileDialog, QMessageBox,
-    QDialog, QProgressBar, QFrame)
+    QDialog, QProgressBar, QFrame, QTreeWidget, QTreeWidgetItem, QHeaderView, QScrollArea)
 from core import ensure_dirs, atomic_json, read_json, new_note, save_note, timestamp, discard_pending
-from models import ready, MODELS, clear_legacy_offline_flags
+from models import ready, MODELS
+from job_queue import JobQueue, ACTIVE, RETRYABLE, source_of
 
 STYLE = '''
 QWidget { background: #f8fafb; color: #233441; font-family: ".AppleSystemUIFont", "Helvetica Neue", sans-serif; font-size: 14px; }
@@ -31,9 +29,15 @@ QPushButton { background: white; border: 1px solid #d6e0e4; border-radius: 9px; 
 QPushButton:hover { background: #eff7f4; border-color: #75aca2; }
 QPushButton:disabled { color: #a4adb3; border-color: #e5e9ec; background: #f4f6f7; }
 QPushButton#record { background: #fff5f3; border-color: #f0d7d1; color: #b55748; }
+QPushButton#record:disabled { background: #f4f6f7; border-color: #e5e9ec; color: #a4adb3; }
 QPushButton#save { background: #197e6e; border-color: #197e6e; color: white; font-weight: 600; }
 QPushButton#save:disabled { background: #b7d1ca; border-color: #b7d1ca; }
 QPushButton#link { background: transparent; border: none; color: #69808a; padding: 4px 8px; font-size: 12px; }
+QPushButton#link:disabled { color: #b0bbc0; }
+QTreeWidget { background: white; border: 1px solid #d8e2e7; border-radius: 8px; padding: 4px; outline: 0; }
+QHeaderView::section { background: #f0f5f3; color: #69808a; border: none; padding: 6px 8px; font-size: 12px; }
+QTreeWidget::item { padding: 5px 8px; }
+QTreeWidget::item:selected { background: #dff1eb; color: #1b5f53; }
 QLineEdit, QComboBox, QSpinBox { background: white; border: 1px solid #d8e2e7; border-radius: 7px; padding: 8px; }
 QProgressBar { background: #e3ece9; border: none; border-radius: 3px; height: 6px; }
 QProgressBar::chunk { background: #32917d; border-radius: 3px; }
@@ -269,27 +273,33 @@ class Window(QWidget):
         self.prompt=settings.get('prompt','')
         self.recording_mode=settings.get('recording_mode','lecture')
         self.recording=None
-        self.proc=None
-        self.job_log=None
-        self.job_spec=None
-        self.job_folder=None
+        self.queue=JobQueue(self.root, recover=not demo)
+        self.queue_rows={}
         self.source=''
         self.saved=False
         self.saved_paths=[]
         self.demo=demo
         self.setWindowTitle('SoriTaker')
-        self.setMinimumSize(590,690)
-        self.resize(630,720)
+        self.setMinimumSize(600,660)
+        self.resize(660,820)
         self.setAcceptDrops(True)
-        layout=QVBoxLayout(self)
-        layout.setContentsMargins(30,25,30,23)
+        outer=QVBoxLayout(self)
+        outer.setContentsMargins(0,0,0,0)
+        scroll=QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body=QWidget()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        layout=QVBoxLayout(body)
+        layout.setContentsMargins(26,22,26,20)
         layout.setSpacing(18)
         header=QHBoxLayout()
         header.addWidget(text('SoriTaker','brand'),1)
         self.options_button=button('Options',self.open_options,'link')
         header.addWidget(self.options_button)
         layout.addLayout(header)
-        layout.addWidget(text('Offline recording. Transcribe only when you choose.'))
+        layout.addWidget(text('Record the next conversation while earlier audio is transcribed.'))
         card=QFrame()
         card.setObjectName('card')
         inner=QVBoxLayout(card)
@@ -346,20 +356,49 @@ class Window(QWidget):
         dest.addWidget(self.output_hint)
         layout.addWidget(self.save_panel)
         self.save_panel.hide()
-        layout.addStretch(1)
-        self.status=text('Press Record, or import an existing audio file.')
-        layout.addWidget(self.status)
+        self.queue_panel=QFrame()
+        queue_layout=QVBoxLayout(self.queue_panel)
+        queue_layout.setContentsMargins(0,8,0,0)
+        queue_layout.setSpacing(8)
+        self.queue_summary=text('QUEUE','state')
+        queue_layout.addWidget(self.queue_summary)
+        self.queue_view=QTreeWidget()
+        self.queue_view.setColumnCount(3)
+        self.queue_view.setHeaderLabels(['File / task','Status','Progress'])
+        self.queue_view.setRootIsDecorated(False)
+        self.queue_view.setMinimumHeight(105)
+        self.queue_view.setMaximumHeight(145)
+        self.queue_view.header().setSectionResizeMode(0,QHeaderView.Stretch)
+        self.queue_view.header().setSectionResizeMode(1,QHeaderView.ResizeToContents)
+        self.queue_view.header().setSectionResizeMode(2,QHeaderView.ResizeToContents)
+        self.queue_view.itemSelectionChanged.connect(self.refresh_queue_actions)
+        queue_layout.addWidget(self.queue_view)
+        self.queue_detail=text('')
+        self.queue_detail.setMinimumHeight(30)
+        self.queue_detail.setMaximumHeight(44)
+        queue_layout.addWidget(self.queue_detail)
         self.progress=QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(5)
         self.progress.setValue(0)
-        layout.addWidget(self.progress)
+        queue_layout.addWidget(self.progress)
+        actions=QHBoxLayout()
+        self.queue_open=button('Open folder',self.open_job_folder,'link')
+        self.queue_audio=button('Use audio',self.use_job_audio,'link')
+        self.queue_retry=button('Retry',self.retry_job,'link')
+        self.cancel_button=button('Cancel task',self.cancel_job,'link')
+        for widget in (self.queue_open,self.queue_audio,self.queue_retry,self.cancel_button):
+            actions.addWidget(widget)
+        actions.addStretch()
+        queue_layout.addLayout(actions)
+        layout.addWidget(self.queue_panel)
+        self.queue_panel.hide()
+        layout.addStretch(1)
+        self.status=text('Press Record, or import an existing audio file.')
+        layout.addWidget(self.status)
         footer=QHBoxLayout()
         self.import_button=button('Import audio',self.import_audio,'link')
         footer.addWidget(self.import_button)
-        self.cancel_button=button('Cancel',self.cancel_job,'link')
-        self.cancel_button.hide()
-        footer.addWidget(self.cancel_button)
         self.discard_button=button('Discard',self.discard,'link')
         self.discard_button.hide()
         footer.addWidget(self.discard_button)
@@ -374,10 +413,12 @@ class Window(QWidget):
         self.timer.start(250)
         self.refresh_summary()
         if not demo:
-            pending = sorted((self.root/'recordings').glob('*.wav'), key=lambda p:p.stat().st_mtime, reverse=True)
+            pending = sorted((p for p in (self.root/'recordings').glob('*.wav') if not self.queue.owns_source(p)),
+                             key=lambda p:p.stat().st_mtime, reverse=True)
             if pending and pending[0].stat().st_size > 44:
                 self.set_source(str(pending[0]))
                 self.status.setText('Recovered an unsaved recording. Save audio, add a transcript, or Discard.')
+        self.refresh_queue()
         if demo:
             self.state.setText('RECORDING COMPLETE')
             self.clock.setText('00:42:18')
@@ -397,8 +438,7 @@ class Window(QWidget):
             speakers=self.speakers,prompt=self.prompt,folder=self.folder.text(),recording_mode=self.recording_mode))
 
     def open_options(self):
-        if not self.proc:
-            Options(self).exec()
+        Options(self).exec()
 
     def choose_folder(self):
         folder=QFileDialog.getExistingDirectory(self,'Save to folder',self.folder.text())
@@ -413,7 +453,7 @@ class Window(QWidget):
                 'The previous unsaved recording is still available at:\n'+self.source+'\n\nYou can import it later.')
 
     def record(self):
-        if self.proc or self.recording:
+        if self.recording:
             return
         setup=RecordSetup(self)
         if setup.exec()!=QDialog.Accepted:
@@ -448,7 +488,7 @@ class Window(QWidget):
         self.save_button.setEnabled(False)
         self.state.setText('RECORDING')
         self.status.setText('Recording is stored temporarily. You can change transcription settings in Options.')
-        self.progress.setValue(0)
+        self.refresh_queue_actions()
 
     def pause(self):
         if not self.recording:
@@ -489,6 +529,9 @@ class Window(QWidget):
                 '\n\nSystem Settings → Privacy & Security → Microphone → allow SoriTaker.')
 
     def set_source(self,path,duration=None):
+        if self.queue.owns_source(path):
+            self.status.setText('This audio is already in the queue. Cancel its task before using it again.')
+            return
         self.source=str(Path(path).resolve())
         self.saved=False
         self.saved_paths=[]
@@ -514,7 +557,10 @@ class Window(QWidget):
             else 'Only the original file will be saved. No transcription or model loading.')
 
     def discard(self):
-        if not self.source or self.saved or self.proc or self.recording:
+        if not self.source or self.saved or self.recording:
+            return
+        if self.queue.owns_source(self.source):
+            self.status.setText('This audio belongs to a queued task. Cancel it in the queue first.')
             return
         owned=Path(self.source).resolve().parent==(self.root/'recordings').resolve()
         message=('Delete this unsaved recording and any temporary transcript? This cannot be undone.' if owned else
@@ -530,19 +576,15 @@ class Window(QWidget):
             return
         self.source=''
         self.saved_paths=[]
-        self.job_spec=None
-        self.job_folder=None
         self.save_panel.hide()
         self.discard_button.hide()
         self.save_button.setEnabled(False)
         self.state.setText('READY TO RECORD')
         self.clock.setText('00:00:00')
-        self.progress.setRange(0,100)
-        self.progress.setValue(0)
         self.status.setText('Recording discarded.' if owned else 'Task discarded. Your imported original is preserved.')
 
     def import_audio(self):
-        if self.proc or self.recording:
+        if self.recording:
             return
         path,_=QFileDialog.getOpenFileName(self,'Import audio',str(Path.home()),
             'Audio / video (*.m4a *.mp3 *.wav *.mp4 *.mov *.flac *.aac *.ogg *.webm);;All files (*)')
@@ -551,11 +593,11 @@ class Window(QWidget):
             self.set_source(path)
 
     def dragEnterEvent(self,event):
-        if event.mimeData().hasUrls() and not self.proc and not self.recording:
+        if event.mimeData().hasUrls() and not self.recording:
             event.acceptProposedAction()
 
     def dropEvent(self,event):
-        if not self.proc and not self.recording:
+        if not self.recording:
             for url in event.mimeData().urls():
                 if url.isLocalFile() and Path(url.toLocalFile()).is_file():
                     self.keep_pending()
@@ -568,7 +610,7 @@ class Window(QWidget):
             folder=str(Path(self.saved_paths[0]).parent) if self.saved_paths else self.folder.text()
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
             return
-        if not self.source or self.proc or self.recording:
+        if not self.source or self.recording:
             return
         kind=self.save_mode.currentData()
         if kind=='transcribe' and (not ready(self.model) or (self.diar and self.speakers!=1 and not ready('diarization'))):
@@ -590,45 +632,123 @@ class Window(QWidget):
         if kind=='transcribe':
             note=new_note(self.source,self.model,self.language,self.diar,self.speakers,self.prompt)
             note['title']=title
-            save_note(note)
             spec['note']=note
         else:
             spec['source']=self.source
         self.start_job(spec)
 
-    def start_job(self,spec):
-        if self.proc or self.recording:
-            return
-        self.job_folder=self.root/'jobs'/uuid.uuid4().hex
-        self.job_folder.mkdir()
-        self.job_spec=spec
-        path=self.job_folder/'job.json'
-        atomic_json(path,spec)
-        entry=[sys.executable] if getattr(sys,'frozen',False) else [sys.executable,str(Path(__file__).with_name('main.py'))]
-        env=clear_legacy_offline_flags(os.environ.copy())
-        env['PYINSTALLER_RESET_ENVIRONMENT']='1'
-        self.job_log=(self.job_folder/'worker.log').open('w',encoding='utf-8')
-        try:
-            self.proc=subprocess.Popen(entry+['--worker',str(path)],stdout=self.job_log,stderr=self.job_log,
-                start_new_session=True,env=env)
-        except Exception as exc:
-            self.job_log.close()
-            self.job_log=None
-            QMessageBox.warning(self,'Could not start',str(exc))
-            return
-        if sys.platform=='darwin':
-            subprocess.Popen(['/usr/bin/caffeinate','-i','-w',str(self.proc.pid)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        self.busy(True)
-        self.state.setText({'transcribe':'PREPARING TRANSCRIPT','save_audio':'SAVING AUDIO','download':'DOWNLOADING MODEL'}[spec['kind']])
-        self.status.setText('Preparing…')
-        self.progress.setRange(0,0)
+    def release_foreground(self, message):
+        self.source=''
+        self.saved=False
+        self.saved_paths=[]
+        self.filename.clear()
+        self.save_panel.hide()
+        self.discard_button.hide()
+        self.save_button.setEnabled(False)
+        self.state.setText('READY TO RECORD')
+        self.clock.setText('00:00:00')
+        self.status.setText(message)
 
-    def busy(self,value):
-        for widget in (self.record_button,self.options_button,self.import_button,self.browse,self.filename,self.discard_button):
-            widget.setEnabled(not value)
-        self.save_mode.setEnabled(not value and not self.saved)
-        self.save_button.setEnabled(not value and bool(self.source))
-        self.cancel_button.setVisible(value)
+    def start_job(self,spec):
+        if self.recording:
+            return
+        try:
+            item=self.queue.enqueue(spec)
+        except Exception as exc:
+            QMessageBox.warning(self,'Could not queue task',str(exc))
+            return
+        if spec['kind'] in ('transcribe','save_audio'):
+            self.release_foreground('Added to the queue. You can start the next recording now.')
+        self.queue.start_next()
+        self.refresh_queue()
+        self.queue_view.setCurrentItem(self.queue_rows[item['id']])
+        return item
+
+    def selected_job(self):
+        row=self.queue_view.currentItem()
+        key=row.data(0,Qt.UserRole) if row else None
+        return next((item for item in self.queue.items if item['id']==key),None)
+
+    def refresh_queue(self):
+        running=sum(item['state'] in ('running','cancelling') for item in self.queue.items)
+        waiting=sum(item['state']=='queued' for item in self.queue.items)
+        self.queue_summary.setText(f'QUEUE  ·  {running} running  ·  {waiting} waiting')
+        positions={item['id']:i+1 for i,item in enumerate(item for item in self.queue.items if item['state']=='queued')}
+        for item in self.queue.items:
+            row=self.queue_rows.get(item['id'])
+            if row is None:
+                row=QTreeWidgetItem(self.queue_view)
+                row.setData(0,Qt.UserRole,item['id'])
+                self.queue_rows[item['id']]=row
+            spec=item['spec']
+            title=spec.get('export_name') or ('Download '+MODELS[spec['model']]['name'])
+            row.setText(0,title)
+            row.setToolTip(0,title)
+            state=item['state']
+            label={'queued':'Waiting','running':'Processing','cancelling':'Cancelling',
+                   'complete':'Saved' if spec['kind']!='download' else 'Ready',
+                   'failed':'Failed','cancelled':'Cancelled','interrupted':'Interrupted'}[state]
+            row.setText(1,f'Waiting #{positions[item["id"]]}' if state=='queued' else label)
+            percent=item.get('progress')
+            row.setText(2,'100%' if state=='complete' else
+                (f'{int(percent)}%' if percent is not None and state=='running' else ''))
+            row.setToolTip(1,item.get('message',''))
+        self.queue_panel.setVisible(bool(self.queue.items))
+        if self.queue.items and not self.queue_view.currentItem():
+            current=self.queue.active or self.queue.items[-1]
+            self.queue_view.setCurrentItem(self.queue_rows[current['id']])
+        self.refresh_queue_actions()
+
+    def refresh_queue_actions(self):
+        item=self.selected_job()
+        state=item['state'] if item else ''
+        self.queue_open.setEnabled(bool(item))
+        self.queue_retry.setEnabled(state in RETRYABLE)
+        self.cancel_button.setEnabled(state in ('queued','running'))
+        source=source_of(item['spec']) if item else ''
+        self.queue_audio.setEnabled(state in RETRYABLE and bool(source) and Path(source).is_file() and
+                                   not self.recording and not self.queue.owns_source(source))
+        message=item.get('message','') if item else ''
+        if item and item.get('result',{}).get('warnings'):
+            message+=' '+ ' / '.join(item['result']['warnings'])
+        self.queue_detail.setText(message)
+        self.queue_detail.setToolTip(message)
+        percent=item.get('progress') if item else None
+        self.progress.setRange(0,0 if state in ('running','cancelling') and percent is None else 100)
+        self.progress.setValue(100 if state=='complete' else int(percent or 0))
+
+    def open_job_folder(self):
+        item=self.selected_job()
+        if item:
+            paths=item.get('result',{}).get('saved_paths',[])
+            folder=Path(paths[0]).parent if paths else self.queue.folder(item)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def use_job_audio(self):
+        item=self.selected_job()
+        if not item or item['state'] not in RETRYABLE or self.recording:
+            return
+        source=source_of(item['spec'])
+        if source and Path(source).is_file() and not self.queue.owns_source(source):
+            self.keep_pending()
+            self.set_source(source)
+            self.filename.setText(item['spec'].get('export_name',Path(source).stem))
+            if item['spec'].get('export_folder'):
+                self.folder.setText(item['spec']['export_folder'])
+
+    def retry_job(self):
+        item=self.selected_job()
+        if not item:
+            return
+        try:
+            self.queue.retry(item)
+        except Exception as exc:
+            QMessageBox.warning(self,'Could not retry',str(exc))
+            return
+        if self.source and self.source==source_of(item['spec']) and not self.recording:
+            self.release_foreground('Task returned to the queue. You can start another recording.')
+        self.queue.start_next()
+        self.refresh_queue()
 
     def poll(self):
         if self.recording:
@@ -636,80 +756,19 @@ class Window(QWidget):
             self.meter.setValue(self.recording.level)
             if not self.recording.is_alive():
                 self.finished_recording()
-        if not self.proc:
-            return
-        status=read_json(self.job_folder/'status.json',{})
-        if status:
-            self.status.setText(status.get('message','Processing…'))
-            value=status.get('progress')
-            if value is None:
-                self.progress.setRange(0,0)
-            else:
-                self.progress.setRange(0,100)
-                self.progress.setValue(int(value))
-        code=self.proc.poll()
-        if code is None:
-            return
-        status=read_json(self.job_folder/'status.json',status)
-        self.proc=None
-        self.job_log.close()
-        self.job_log=None
-        self.busy(False)
-        self.progress.setRange(0,100)
-        if code==0 and status.get('state')=='complete':
-            self.progress.setValue(100)
-            if self.job_spec['kind'] in ('transcribe','save_audio'):
-                self.saved=True
-                self.saved_paths=status.get('saved_paths',[])
-                self.save_button.setText('Open folder')
-                self.state.setText('SAVED')
-                self.output_hint.setText('\n'.join(Path(p).name for p in self.saved_paths))
-                self.save_mode.setEnabled(False)
-                self.discard_button.hide()
-                self.status.setText('Audio saved. No transcript was created.' if self.job_spec['kind']=='save_audio' else
-                    'Audio and transcript saved. You can start a new recording.')
-                if status.get('warnings'):
-                    self.status.setText('Saved with a note: '+' / '.join(status['warnings']))
-            else:
-                self.state.setText('MODEL READY')
-                self.status.setText('Model installed. You can now save a recording or download another model in Options.')
-        else:
-            self.progress.setValue(0)
-            self.state.setText('PLEASE CHECK')
-            message=status.get('message') or 'Could not finish. Your original audio has been preserved.'
-            self.status.setText(message)
-            QMessageBox.warning(self,'Could not finish',message+'\n\nLog folder:\n'+str(self.job_folder))
+        self.queue.tick()
+        self.refresh_queue()
 
     def cancel_job(self):
-        if not self.proc:
-            return
-        if self.proc.poll() is not None:
-            self.poll()
-            return
-        try:
-            os.killpg(self.proc.pid,signal.SIGTERM)
-            self.proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid,signal.SIGKILL)
-            self.proc.wait(timeout=2)
-        except ProcessLookupError:
-            pass
-        # The worker may have finished saving just before the cancel request.
-        if read_json(self.job_folder/'status.json',{}).get('state')=='complete':
-            self.poll()
-            return
-        self.proc=None
-        self.job_log.close()
-        self.job_log=None
-        self.busy(False)
-        self.progress.setRange(0,100)
-        self.progress.setValue(0)
-        self.state.setText('CANCELLED')
-        self.status.setText('Cancelled. Your audio is preserved. Save audio only, retry transcription, or Discard.')
+        item=self.selected_job()
+        if item:
+            self.queue.cancel(item)
+            self.refresh_queue()
 
     def closeEvent(self,event):
-        if self.recording or self.proc:
-            answer=QMessageBox.question(self,'Close SoriTaker?','Stop the current task and close? Recorded audio is preserved.',
+        if self.recording or any(item['state'] in ACTIVE for item in self.queue.items):
+            answer=QMessageBox.question(self,'Close SoriTaker?',
+                'Stop recording and pause unfinished work? Audio is preserved. Waiting tasks resume next time; interrupted tasks can be retried.',
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
             if answer!=QMessageBox.Yes:
                 event.ignore()
@@ -720,8 +779,13 @@ class Window(QWidget):
                 if self.recording.is_alive():
                     event.ignore()
                     return
-            if self.proc:
-                self.cancel_job()
+            try:
+                self.queue.shutdown()
+            except Exception as exc:
+                QMessageBox.warning(self,'Could not close',str(exc))
+                event.ignore()
+                return
+        self.timer.stop()
         event.accept()
 
 

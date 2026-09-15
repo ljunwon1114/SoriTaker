@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 APP_NAME = "SoriTaker"
-VERSION = "0.3.4"
+VERSION = "0.4.0"
 
 
 def data_home() -> Path:
@@ -341,6 +341,8 @@ def discard_pending(source: str, keep_job: Path | None = None) -> None:
             if not isinstance(info, dict):
                 continue
             if category == 'jobs':
+                if info.get('queue_managed'):
+                    continue  # The queue owns its history and input recordings.
                 if info.get('kind') not in ('transcribe', 'save_audio'):
                     continue
                 info = info.get('note', {}) if info.get('kind') == 'transcribe' else info

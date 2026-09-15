@@ -46,7 +46,7 @@ on_error() {
 }
 trap on_error ERR
 
-printf '\nSoriTaker — Offline transcription for Apple Silicon / 16 GB RAM\n\n'
+printf '\nSoriTaker — Local recording and transcription for Apple Silicon Macs\n\n'
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   printf 'Run this on an Apple Silicon Mac with Rosetta disabled for Terminal.\n'
   exit 1
