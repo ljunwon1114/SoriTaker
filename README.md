@@ -28,7 +28,6 @@ starts when you choose to save a transcript; it does not run while recording.
 ## Requirements
 
 - Apple Silicon Mac running macOS Sonoma 14 or later.
-- Target configuration: M3 with 16 GB RAM.
 - About 15–20 GB of free disk space for the initial installation and build.
   Actual usage varies with dependencies and selected models.
 - Internet access for the initial installation and additional model downloads.
