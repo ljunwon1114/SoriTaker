@@ -345,6 +345,39 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         self.assertEqual(spec['kind'], 'save_audio')
         self.assertEqual(spec['source'], str(self.source))
 
+    def test_save_audio_opens_audio_only_and_clear_keeps_capture_and_waiting_work(self):
+        cancelled=self.window.queue.enqueue(dict(kind='save_audio',source=str(self.source),
+            export_name='Keep audio',export_folder=str(self.root/'exports')))
+        self.window.queue.cancel(cancelled)
+        waiting=self.window.queue.enqueue(dict(kind='download',model='large'))
+        self.window.refresh_queue()
+        self.window.queue_view.setCurrentItem(self.window.queue_rows[cancelled['id']])
+        self.window.queue_audio.click()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        self.assertEqual(self.window.save_mode.currentData(),'save_audio')
+        self.assertEqual(self.window.filename.text(),'Keep audio')
+        self.window.save_dialog.reject()
+        self.window.source=''
+        rec=gui.Recorder(self.root/'recordings'/'next.wav')
+        self.window.recording=rec
+        self.window.state.setText('RECORDING')
+        self.window.queue_clear.click()
+        self.assertEqual(self.window.queue_view.topLevelItemCount(),1)
+        self.assertIs(self.window.selected_job(),waiting)
+        self.assertIs(self.window.recording,rec)
+        self.assertFalse(rec.stop_event.is_set())
+        self.assertEqual(self.window.state.text(),'RECORDING')
+        self.assertTrue(Path(job_queue.source_of(cancelled['spec'])).is_file())
+        self.assertFalse(self.window.queue_clear.isEnabled())
+        self.window.queue=job_queue.JobQueue(self.root)
+        self.window.refresh_queue()
+        self.assertEqual(self.window.queue_view.topLevelItemCount(),1)
+        self.window.queue.cancel(self.window.selected_job())
+        self.window.refresh_queue()
+        self.window.queue_clear.click()
+        self.assertEqual(self.window.queue_view.topLevelItemCount(),0)
+        self.assertTrue(self.window.queue_panel.isHidden())
+
     def test_discard_cancel_preserves_then_confirm_deletes_pending_work(self):
         folder, job = self.partial_attempt(self.source)
         self.window.set_source(str(self.source))

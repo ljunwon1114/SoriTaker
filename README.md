@@ -7,7 +7,7 @@ Record, pause, choose what to keep, and save audio with an optional Korean or
 English transcript. The interface, installer messages, diagnostics, and developer
 documentation are in English. The Korean language option uses its native label.
 
-**Version: 0.4.1 · Early personal-use release**
+**Version: 0.4.2 · Early personal-use release**
 
 ![SoriTaker recording screen](preview.png)
 
@@ -118,14 +118,14 @@ folder. The old app is backed up only after the new build passes its checks.
      a model, transcribing, or converting its format. No models are required.
 6. The dialog closes as soon as the task is queued, so you can start the next
    recording immediately. Successful tasks disappear from **Queue** after their
-   files finish saving. **Open output folder** opens the most recently saved
-   output folder, or your configured destination if nothing has finished yet.
+   files finish saving. The version is shown at the bottom right of the main
+   screen. Saved output paths are also available in the completion message tooltip.
 
 ![Save dialog opened by Stop](preview-save.png)
 
 **Cancel**, Escape, or closing the save dialog keeps the unsaved audio. Click
 **Review recording** to reopen it with the same filename and choices. Imported
-files and **Use audio** open this dialog too. An unsaved microphone recording
+files and **Save audio…** open this dialog too. An unsaved microphone recording
 is offered again after relaunch. There is no Save button on the main screen.
 
 Example output from a microphone recording:
@@ -150,7 +150,7 @@ keeps the external original. The save dialog closes after a confirmed discard.
 
 Select a waiting or processing task in **Queue** and click **Cancel task** to stop
 that task. Cancellation preserves its audio and does not stop a new recording.
-Use **Retry** to run the same task again, or **Use audio** to bring the recording
+Use **Retry** to run the same task again, or **Save audio…** to bring the recording
 back to the save dialog and choose audio-only saving or different settings.
 
 ## Background queue
@@ -177,12 +177,19 @@ warnings) remains below the queue.
 
 Select a task to see its message. **Open folder** opens that task's job folder
 when investigating unfinished work. **Cancel task** affects only the selected task.
-Failed, cancelled, and interrupted tasks stay available for recovery, and the next
-waiting task can continue without a popup interrupting a new recording.
+Failed, cancelled, and interrupted tasks stay available for recovery until you
+click **Clear**. Clear removes all finished entries from the list, including
+cancelled and failed tasks; it leaves waiting, running, and cancelling tasks alone.
+Cleared entries remain hidden after relaunch. Audio, exports, logs, and completion
+receipts are preserved in their existing locations. App-owned audio for a cleared
+unfinished task remains under the app data folder at `jobs/<task-id>/recording.wav`
+and can be imported again. The next waiting task can continue without a popup
+interrupting a new recording.
 
 **Retry** puts a failed, cancelled, or interrupted task at the back of the queue
-with its saved settings. **Use audio** returns its source to the save dialog while
-recording is stopped, so you can change the model or save only the audio.
+with its saved settings. **Save audio…** opens the preserved source in the save
+dialog with **Audio only** selected. You can choose a destination and filename,
+or switch to audio + transcript. It is available while recording is stopped.
 
 Closing the app asks before stopping capture and active work. Waiting tasks remain
 on disk and resume on the next launch. An interrupted task is kept for manual retry;

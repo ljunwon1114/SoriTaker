@@ -16,6 +16,7 @@ from models import clear_legacy_offline_flags
 
 ACTIVE = {'queued', 'running', 'cancelling'}
 RETRYABLE = {'failed', 'cancelled', 'interrupted'}
+CLEARABLE = RETRYABLE | {'complete'}
 
 
 def source_of(spec):
@@ -42,7 +43,7 @@ class JobQueue:
                     continue
                 if not isinstance(item, dict):
                     item = dict(created=folder.stat().st_mtime_ns, state='interrupted',
-                                message='Recovered unfinished task. Retry or use the audio file.')
+                                message='Recovered unfinished task. Retry or save the audio file.')
                     source = source_of(spec)
                     original = Path(spec.get('input_original', ''))
                     if source and not Path(source).is_file() and original.is_file() and original.resolve().parent == (self.root/'recordings').resolve():
@@ -190,7 +191,7 @@ class JobQueue:
                     item.update(state='complete', result=result, message=result['message'], progress=100)
                 elif item['state'] == 'cancelling':
                     item.update(state='interrupted' if self.stopping else 'cancelled',
-                                message='Audio is preserved. Retry or use the audio file.', progress=None)
+                                message='Audio is preserved. Retry or save the audio file.', progress=None)
                 else:
                     item.update(state='failed', message=status.get('message') or 'Worker stopped. Audio is preserved.', progress=None)
                 self.persist(item)
@@ -226,11 +227,22 @@ class JobQueue:
         source = source_of(item['spec'])
         if source and self.owns_source(source):
             raise ValueError('This file is already being processed in another queue entry.')
-        item.update(state='queued', message='Waiting', progress=None, created=time.time_ns())
+        item.update(state='queued', message='Waiting', progress=None, created=time.time_ns(), dismissed=False)
         # Do not erase completion receipts. The worker checks them under the lock.
         self.persist(item)
         self.items.remove(item)
         self.items.append(item)
+
+    def clear_finished(self):
+        """Dismiss finished rows durably; retain audio, logs, and export receipts."""
+        count = 0
+        for item in self.items:
+            if item['state'] in CLEARABLE and not item.get('dismissed') and item is not self.active:
+                updated = dict(item, dismissed=True)
+                self.persist(updated)
+                item['dismissed'] = True
+                count += 1
+        return count
 
     def shutdown(self):
         self.stopping = True

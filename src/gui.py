@@ -13,9 +13,9 @@ from PySide6.QtGui import QDesktopServices, QFontDatabase, QIcon
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QCheckBox, QSpinBox, QFileDialog, QMessageBox,
     QDialog, QProgressBar, QFrame, QTreeWidget, QTreeWidgetItem, QHeaderView, QScrollArea)
-from core import ensure_dirs, atomic_json, read_json, new_note, save_note, timestamp, discard_pending
+from core import ensure_dirs, atomic_json, read_json, new_note, save_note, timestamp, discard_pending, VERSION
 from models import ready, MODELS
-from job_queue import JobQueue, ACTIVE, RETRYABLE, source_of
+from job_queue import JobQueue, ACTIVE, RETRYABLE, CLEARABLE, source_of
 
 STYLE = '''
 QWidget { background: #f8fafb; color: #233441; font-family: ".AppleSystemUIFont", "Helvetica Neue", sans-serif; font-size: 14px; }
@@ -277,7 +277,6 @@ class Window(QWidget):
         self.queue=JobQueue(self.root, recover=not demo)
         self.queue_rows={}
         self.completed_ids=set()
-        self.last_output_folder=''
         self.source=''
         self.saved=False
         self.saved_paths=[]
@@ -416,12 +415,16 @@ class Window(QWidget):
         queue_layout.addWidget(self.progress)
         actions=QHBoxLayout()
         self.queue_open=button('Open folder',self.open_job_folder,'link')
-        self.queue_audio=button('Use audio',self.use_job_audio,'link')
+        self.queue_audio=button('Save audio…',self.save_job_audio,'link')
+        self.queue_audio.setToolTip('Open the preserved recording with Audio only selected.')
         self.queue_retry=button('Retry',self.retry_job,'link')
         self.cancel_button=button('Cancel task',self.cancel_job,'link')
         for widget in (self.queue_open,self.queue_audio,self.queue_retry,self.cancel_button):
             actions.addWidget(widget)
         actions.addStretch()
+        self.queue_clear=button('Clear',self.clear_finished_jobs,'link')
+        self.queue_clear.setToolTip('Remove finished, cancelled, and failed tasks from the list. Audio files are kept.')
+        actions.addWidget(self.queue_clear)
         queue_layout.addLayout(actions)
         layout.addWidget(self.queue_panel)
         self.queue_panel.hide()
@@ -438,7 +441,8 @@ class Window(QWidget):
         self.review_button.hide()
         footer.addWidget(self.review_button)
         footer.addStretch()
-        footer.addWidget(button('Open output folder',self.open_output_folder,'link'))
+        self.version_label=text(f'v{VERSION}')
+        footer.addWidget(self.version_label)
         layout.addLayout(footer)
         self.timer=QTimer(self)
         self.timer.timeout.connect(self.poll)
@@ -481,13 +485,6 @@ class Window(QWidget):
     def save_dialog_closed(self):
         if self.source and not self.recording:
             self.status.setText('Unsaved audio is preserved. Click Review recording to save or discard it.')
-
-    def open_output_folder(self):
-        folder=Path(self.last_output_folder or self.folder.text()).expanduser()
-        if folder.is_dir():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-        else:
-            QMessageBox.information(self,'Output folder','This folder will be created when you save:\n'+str(folder))
 
     def keep_pending(self):
         # Unsaved recordings are kept on disk even when starting another recording.
@@ -725,23 +722,21 @@ class Window(QWidget):
 
     def refresh_queue(self):
         # A reported 100% can precede file export. Hide only confirmed successes.
-        completed=[item for item in self.queue.items if item['state']=='complete' and item['id'] not in self.completed_ids]
+        completed=[item for item in self.queue.items if item['state']=='complete' and not item.get('dismissed')
+                   and item['id'] not in self.completed_ids]
         if completed:
             self.completed_ids.update(item['id'] for item in completed)
             item=completed[-1]
             spec=item['spec']
             result=item.get('result',{})
-            paths=result.get('saved_paths',[])
-            if paths:
-                self.last_output_folder=str(Path(paths[0]).parent)
             message=('Model ready: '+MODELS[spec['model']]['name'] if spec['kind']=='download' else
                      'Saved: '+spec['export_name'])
             if result.get('warnings'):
                 message+=' — '+' / '.join(result['warnings'])
             self.completion_notice.setText(message)
-            self.completion_notice.setToolTip(message)
+            self.completion_notice.setToolTip(message+'\n'+'\n'.join(result.get('saved_paths',[])))
             self.completion_notice.show()
-        visible=[item for item in self.queue.items if item['state']!='complete']
+        visible=[item for item in self.queue.items if item['state']!='complete' and not item.get('dismissed')]
         visible_ids={item['id'] for item in visible}
         self.queue_view.blockSignals(True)
         for key in list(self.queue_rows):
@@ -782,6 +777,8 @@ class Window(QWidget):
         self.queue_open.setEnabled(bool(item))
         self.queue_retry.setEnabled(state in RETRYABLE)
         self.cancel_button.setEnabled(state in ('queued','running'))
+        self.queue_clear.setEnabled(any(task['state'] in CLEARABLE and not task.get('dismissed')
+                                       and task is not self.queue.active for task in self.queue.items))
         source=source_of(item['spec']) if item else ''
         self.queue_audio.setEnabled(state in RETRYABLE and bool(source) and Path(source).is_file() and
                                    not self.recording and not self.queue.owns_source(source))
@@ -801,7 +798,7 @@ class Window(QWidget):
             folder=Path(paths[0]).parent if paths else self.queue.folder(item)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
-    def use_job_audio(self):
+    def save_job_audio(self):
         item=self.selected_job()
         if not item or item['state'] not in RETRYABLE or self.recording:
             return
@@ -812,7 +809,20 @@ class Window(QWidget):
             self.filename.setText(item['spec'].get('export_name',Path(source).stem))
             if item['spec'].get('export_folder'):
                 self.folder.setText(item['spec']['export_folder'])
+            self.save_mode.setCurrentIndex(self.save_mode.findData('save_audio'))
             self.open_save_dialog()
+
+    def clear_finished_jobs(self):
+        try:
+            count=self.queue.clear_finished()
+            if count:
+                self.completion_notice.hide()
+                if not self.recording and not self.source:
+                    self.status.setText('Queue cleared. Audio and saved files are preserved.')
+        except OSError as exc:
+            QMessageBox.warning(self,'Could not clear queue',str(exc))
+        finally:
+            self.refresh_queue()
 
     def retry_job(self):
         item=self.selected_job()

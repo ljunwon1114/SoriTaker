@@ -4,6 +4,8 @@ Environment: Linux x86_64, Python 3.12.14. Supported platform: Apple Silicon Mac
 
 Completed:
 
+- Version 0.4.2: 65 automated tests passed. Clear dismisses completed, cancelled, failed, and interrupted rows durably without deleting audio, logs, or receipts. Tests cover relaunch persistence, preservation of waiting/cancelling tasks and foreground capture, and a failed metadata write. Save audio opens the save dialog with Audio only selected. The footer displays the app version instead of a second folder button.
+
 - Version 0.4.1: 62 automated tests passed. Stop opens a nonblocking modal save dialog after the recorder finishes; Escape preserves the audio and choices for Review recording; imports and Options use the same dialog; invalid names and queue failures keep the dialog open. Save and confirmed discard close it. The main screen has no Save button.
 - Queue display checks distinguish reported 100% from confirmed completion, keep failed work visible, move selection to remaining work, and preserve recognition warnings in a completion message. Real worker/capture integration verifies that completed rows disappear while the next recording stays paused, exported WAV/TXT files survive, and completion receipts prevent completed entries from reappearing after relaunch.
 - Version 0.4.0: 58 automated tests passed. New queue checks cover serial ordering, per-task settings, audio handoff rollback, process-start and worker failures, pending cancellation, a completion/cancel race, retry ordering, shutdown/relaunch recovery, interrupted enqueue recovery, imported-file preservation, and duplicate-export prevention.

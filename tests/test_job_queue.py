@@ -68,6 +68,41 @@ class Fixture(unittest.TestCase):
 
 
 class QueueTests(Fixture):
+    def test_clear_retains_audio_and_receipts_and_persists_across_restart(self):
+        cancelled=self.queue.enqueue(self.spec('Cancelled'))
+        self.queue.cancel(cancelled)
+        interrupted=self.queue.enqueue(self.spec('Interrupted'))
+        interrupted['state']='interrupted'
+        self.queue.persist(interrupted)
+        completed=self.queue.enqueue(self.spec('Completed'))
+        receipt=self.queue.folder(completed)/'result.json'
+        atomic_json(receipt,dict(state='complete',message='Saved',saved_paths=[]))
+        completed['state']='complete'
+        pending=self.queue.enqueue(self.spec('Waiting'))
+        stopping=self.queue.enqueue(self.spec('Stopping'))
+        stopping['state']='cancelling'
+        self.queue.active=stopping
+        self.assertEqual(self.queue.clear_finished(),3)
+        self.assertEqual(self.queue.clear_finished(),0)
+        self.assertTrue(Path(source_of(cancelled['spec'])).is_file())
+        self.assertTrue(Path(source_of(interrupted['spec'])).is_file())
+        self.assertTrue(receipt.is_file())
+        self.assertFalse(pending.get('dismissed',False))
+        self.assertFalse(stopping.get('dismissed',False))
+        restored=JobQueue(self.root)
+        self.assertEqual({i['id'] for i in restored.items if i.get('dismissed')},
+                         {cancelled['id'],interrupted['id'],completed['id']})
+        self.assertTrue(Path(source_of(cancelled['spec'])).is_file())
+
+    def test_clear_failure_keeps_task_visible_and_preserves_source(self):
+        item=self.queue.enqueue(self.spec('Keep'))
+        self.queue.cancel(item)
+        with patch.object(self.queue,'persist',side_effect=OSError('Disk full')):
+            with self.assertRaises(OSError):
+                self.queue.clear_finished()
+        self.assertFalse(item.get('dismissed',False))
+        self.assertTrue(Path(source_of(item['spec'])).is_file())
+
     def test_fifo_and_frozen_settings_while_another_job_is_running(self):
         spec = self.spec('First','transcribe')
         with patch('job_queue.subprocess.Popen',side_effect=FakeProcess) as spawn:
