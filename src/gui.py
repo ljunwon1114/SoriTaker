@@ -125,7 +125,8 @@ class Recorder(threading.Thread):
 
 class Options(QDialog):
     def __init__(self, parent):
-        super().__init__(parent)
+        super().__init__(parent.save_dialog if parent.save_dialog.isVisible() else parent)
+        self.owner = parent
         self.setWindowTitle('Options')
         self.setMinimumWidth(420)
         layout = QVBoxLayout(self)
@@ -193,7 +194,7 @@ class Options(QDialog):
         layout.addWidget(button('Done',self.commit,'save'))
 
     def commit(self):
-        parent=self.parent()
+        parent=self.owner
         if not parent.recording:
             parent.device=self.device.currentData()
         parent.language=self.language.currentData()
@@ -207,10 +208,10 @@ class Options(QDialog):
         self.accept()
 
     def download(self,key):
-        if self.parent().recording:
+        if self.owner.recording:
             return
         self.commit()
-        self.parent().start_job(dict(kind='download',model=key))
+        self.owner.start_job(dict(kind='download',model=key))
 
 
 class RecordSetup(QDialog):
@@ -275,6 +276,8 @@ class Window(QWidget):
         self.recording=None
         self.queue=JobQueue(self.root, recover=not demo)
         self.queue_rows={}
+        self.completed_ids=set()
+        self.last_output_folder=''
         self.source=''
         self.saved=False
         self.saved_paths=[]
@@ -329,6 +332,18 @@ class Window(QWidget):
         layout.addWidget(card)
         self.summary=text('')
         layout.addWidget(self.summary)
+        self.save_dialog=QDialog(self)
+        self.save_dialog.setWindowTitle('Save recording')
+        self.save_dialog.setMinimumWidth(500)
+        save_layout=QVBoxLayout(self.save_dialog)
+        save_layout.setContentsMargins(24,24,24,24)
+        save_layout.setSpacing(14)
+        save_header=QHBoxLayout()
+        save_header.addWidget(text('Save recording','brand'),1)
+        save_header.addWidget(button('Options',self.open_options,'link'))
+        save_layout.addLayout(save_header)
+        self.save_summary=text('')
+        save_layout.addWidget(self.save_summary)
         self.save_panel=QFrame()
         dest=QVBoxLayout(self.save_panel)
         dest.setContentsMargins(0,0,0,0)
@@ -354,8 +369,25 @@ class Window(QWidget):
         dest.addLayout(row)
         self.output_hint=text('Audio + transcript (.txt) will be saved together.')
         dest.addWidget(self.output_hint)
-        layout.addWidget(self.save_panel)
+        save_layout.addWidget(self.save_panel)
         self.save_panel.hide()
+        save_layout.addWidget(text('Cancel keeps the recording on this Mac so you can save it later.'))
+        save_actions=QHBoxLayout()
+        self.discard_button=button('Discard',self.discard,'link')
+        self.discard_button.hide()
+        save_actions.addWidget(self.discard_button)
+        save_actions.addStretch()
+        self.save_cancel=button('Cancel',self.save_dialog.reject)
+        self.save_cancel.setAutoDefault(False)
+        self.discard_button.setAutoDefault(False)
+        save_actions.addWidget(self.save_cancel)
+        self.save_button=button('Save',self.save,'save')
+        self.save_button.setDefault(True)
+        self.save_button.setMinimumWidth(125)
+        self.save_button.setEnabled(False)
+        save_actions.addWidget(self.save_button)
+        save_layout.addLayout(save_actions)
+        self.save_dialog.rejected.connect(self.save_dialog_closed)
         self.queue_panel=QFrame()
         queue_layout=QVBoxLayout(self.queue_panel)
         queue_layout.setContentsMargins(0,8,0,0)
@@ -396,17 +428,17 @@ class Window(QWidget):
         layout.addStretch(1)
         self.status=text('Press Record, or import an existing audio file.')
         layout.addWidget(self.status)
+        self.completion_notice=text('')
+        self.completion_notice.hide()
+        layout.addWidget(self.completion_notice)
         footer=QHBoxLayout()
         self.import_button=button('Import audio',self.import_audio,'link')
         footer.addWidget(self.import_button)
-        self.discard_button=button('Discard',self.discard,'link')
-        self.discard_button.hide()
-        footer.addWidget(self.discard_button)
+        self.review_button=button('Review recording',self.open_save_dialog,'link')
+        self.review_button.hide()
+        footer.addWidget(self.review_button)
         footer.addStretch()
-        self.save_button=button('Save',self.save,'save')
-        self.save_button.setMinimumWidth(125)
-        self.save_button.setEnabled(False)
-        footer.addWidget(self.save_button)
+        footer.addWidget(button('Open output folder',self.open_output_folder,'link'))
         layout.addLayout(footer)
         self.timer=QTimer(self)
         self.timer.timeout.connect(self.poll)
@@ -416,22 +448,15 @@ class Window(QWidget):
             pending = sorted((p for p in (self.root/'recordings').glob('*.wav') if not self.queue.owns_source(p)),
                              key=lambda p:p.stat().st_mtime, reverse=True)
             if pending and pending[0].stat().st_size > 44:
-                self.set_source(str(pending[0]))
+                self.set_source(str(pending[0]),show_dialog=False)
                 self.status.setText('Recovered an unsaved recording. Save audio, add a transcript, or Discard.')
+                QTimer.singleShot(0,self.open_save_dialog)
         self.refresh_queue()
-        if demo:
-            self.state.setText('RECORDING COMPLETE')
-            self.clock.setText('00:42:18')
-            self.filename.setText('Seminar_2026-09-14')
-            self.folder.setText('~/Documents/SoriTaker')
-            self.save_panel.show()
-            self.save_button.setEnabled(True)
-            self.discard_button.show()
-            self.status.setText('Choose what to save, or Discard this recording.')
 
     def refresh_summary(self):
         language={'ko':'Korean','en':'English','auto':'Auto-detect'}.get(self.language,'Korean')
         self.summary.setText(f"{language}  ·  {'Fast' if self.model=='turbo' else 'Accurate'}  ·  Speaker labels {'on' if self.diar else 'off'}")
+        self.save_summary.setText(self.summary.text())
 
     def save_settings(self):
         atomic_json(self.root/'settings.json',dict(language=self.language,model=self.model,diar=self.diar,
@@ -441,10 +466,28 @@ class Window(QWidget):
         Options(self).exec()
 
     def choose_folder(self):
-        folder=QFileDialog.getExistingDirectory(self,'Save to folder',self.folder.text())
+        folder=QFileDialog.getExistingDirectory(self.save_dialog,'Save to folder',self.folder.text())
         if folder:
             self.folder.setText(folder)
             self.save_settings()
+
+    def open_save_dialog(self):
+        if not self.source or self.recording:
+            return
+        self.save_dialog.open()
+        self.filename.setFocus()
+        self.filename.selectAll()
+
+    def save_dialog_closed(self):
+        if self.source and not self.recording:
+            self.status.setText('Unsaved audio is preserved. Click Review recording to save or discard it.')
+
+    def open_output_folder(self):
+        folder=Path(self.last_output_folder or self.folder.text()).expanduser()
+        if folder.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        else:
+            QMessageBox.information(self,'Output folder','This folder will be created when you save:\n'+str(folder))
 
     def keep_pending(self):
         # Unsaved recordings are kept on disk even when starting another recording.
@@ -483,6 +526,8 @@ class Window(QWidget):
         self.options_button.setEnabled(True)
         self.import_button.setEnabled(False)
         self.save_panel.hide()
+        self.save_dialog.hide()
+        self.review_button.hide()
         self.discard_button.hide()
         self.save_button.setText('Save')
         self.save_button.setEnabled(False)
@@ -512,6 +557,8 @@ class Window(QWidget):
 
     def finished_recording(self):
         rec=self.recording
+        if rec is None:
+            return
         self.recording=None
         self.record_button.setEnabled(True)
         self.pause_button.setEnabled(False)
@@ -520,15 +567,15 @@ class Window(QWidget):
         self.options_button.setEnabled(True)
         self.import_button.setEnabled(True)
         self.meter.setValue(0)
+        if rec.error:
+            QMessageBox.warning(self,'Recording could not finish',rec.error+
+                '\n\nSystem Settings → Privacy & Security → Microphone → allow SoriTaker.')
         if rec.path.exists() and rec.path.stat().st_size>44:
             self.set_source(str(rec.path),rec.duration)
         else:
             self.state.setText('READY TO RECORD')
-        if rec.error:
-            QMessageBox.warning(self,'Recording could not finish',rec.error+
-                '\n\nSystem Settings → Privacy & Security → Microphone → allow SoriTaker.')
 
-    def set_source(self,path,duration=None):
+    def set_source(self,path,duration=None,show_dialog=True):
         if self.queue.owns_source(path):
             self.status.setText('This audio is already in the queue. Cancel its task before using it again.')
             return
@@ -548,7 +595,10 @@ class Window(QWidget):
         self.save_mode.setEnabled(True)
         self.save_mode.setCurrentIndex(0)
         self.discard_button.show()
+        self.review_button.show()
         self.refresh_save_mode()
+        if show_dialog:
+            self.open_save_dialog()
 
     def refresh_save_mode(self):
         if not hasattr(self,'output_hint'):
@@ -565,20 +615,22 @@ class Window(QWidget):
         owned=Path(self.source).resolve().parent==(self.root/'recordings').resolve()
         message=('Delete this unsaved recording and any temporary transcript? This cannot be undone.' if owned else
             'Discard this task and any temporary transcript? The imported original file will stay where it is.')
-        answer=QMessageBox.question(self,'Discard current recording?',message,
+        answer=QMessageBox.question(self.save_dialog,'Discard current recording?',message,
             QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
         if answer!=QMessageBox.Yes:
             return
         try:
             discard_pending(self.source)
         except OSError as exc:
-            QMessageBox.warning(self,'Could not discard',str(exc))
+            QMessageBox.warning(self.save_dialog,'Could not discard',str(exc))
             return
         self.source=''
         self.saved_paths=[]
         self.save_panel.hide()
         self.discard_button.hide()
         self.save_button.setEnabled(False)
+        self.review_button.hide()
+        self.save_dialog.accept()
         self.state.setText('READY TO RECORD')
         self.clock.setText('00:00:00')
         self.status.setText('Recording discarded.' if owned else 'Task discarded. Your imported original is preserved.')
@@ -619,13 +671,13 @@ class Window(QWidget):
             return
         title=self.filename.text().strip()
         if not title or title in ('.','..') or any(c in title for c in '/\\\x00'):
-            QMessageBox.warning(self,'File name','Enter a file name without / or \\.')
+            QMessageBox.warning(self.save_dialog,'File name','Enter a file name without / or \\.')
             return
         folder=Path(self.folder.text()).expanduser()
         try:
             folder.mkdir(parents=True,exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self,'Save folder',str(exc))
+            QMessageBox.warning(self.save_dialog,'Save folder',str(exc))
             return
         self.save_settings()
         spec=dict(kind=kind,export_folder=str(folder.resolve()),export_name=title)
@@ -645,6 +697,8 @@ class Window(QWidget):
         self.save_panel.hide()
         self.discard_button.hide()
         self.save_button.setEnabled(False)
+        self.review_button.hide()
+        self.save_dialog.accept()
         self.state.setText('READY TO RECORD')
         self.clock.setText('00:00:00')
         self.status.setText(message)
@@ -655,7 +709,7 @@ class Window(QWidget):
         try:
             item=self.queue.enqueue(spec)
         except Exception as exc:
-            QMessageBox.warning(self,'Could not queue task',str(exc))
+            QMessageBox.warning(self.save_dialog if self.save_dialog.isVisible() else self,'Could not queue task',str(exc))
             return
         if spec['kind'] in ('transcribe','save_audio'):
             self.release_foreground('Added to the queue. You can start the next recording now.')
@@ -670,11 +724,35 @@ class Window(QWidget):
         return next((item for item in self.queue.items if item['id']==key),None)
 
     def refresh_queue(self):
+        # A reported 100% can precede file export. Hide only confirmed successes.
+        completed=[item for item in self.queue.items if item['state']=='complete' and item['id'] not in self.completed_ids]
+        if completed:
+            self.completed_ids.update(item['id'] for item in completed)
+            item=completed[-1]
+            spec=item['spec']
+            result=item.get('result',{})
+            paths=result.get('saved_paths',[])
+            if paths:
+                self.last_output_folder=str(Path(paths[0]).parent)
+            message=('Model ready: '+MODELS[spec['model']]['name'] if spec['kind']=='download' else
+                     'Saved: '+spec['export_name'])
+            if result.get('warnings'):
+                message+=' — '+' / '.join(result['warnings'])
+            self.completion_notice.setText(message)
+            self.completion_notice.setToolTip(message)
+            self.completion_notice.show()
+        visible=[item for item in self.queue.items if item['state']!='complete']
+        visible_ids={item['id'] for item in visible}
+        self.queue_view.blockSignals(True)
+        for key in list(self.queue_rows):
+            if key not in visible_ids:
+                row=self.queue_rows.pop(key)
+                self.queue_view.takeTopLevelItem(self.queue_view.indexOfTopLevelItem(row))
         running=sum(item['state'] in ('running','cancelling') for item in self.queue.items)
         waiting=sum(item['state']=='queued' for item in self.queue.items)
         self.queue_summary.setText(f'QUEUE  ·  {running} running  ·  {waiting} waiting')
         positions={item['id']:i+1 for i,item in enumerate(item for item in self.queue.items if item['state']=='queued')}
-        for item in self.queue.items:
+        for item in visible:
             row=self.queue_rows.get(item['id'])
             if row is None:
                 row=QTreeWidgetItem(self.queue_view)
@@ -686,17 +764,16 @@ class Window(QWidget):
             row.setToolTip(0,title)
             state=item['state']
             label={'queued':'Waiting','running':'Processing','cancelling':'Cancelling',
-                   'complete':'Saved' if spec['kind']!='download' else 'Ready',
                    'failed':'Failed','cancelled':'Cancelled','interrupted':'Interrupted'}[state]
             row.setText(1,f'Waiting #{positions[item["id"]]}' if state=='queued' else label)
             percent=item.get('progress')
-            row.setText(2,'100%' if state=='complete' else
-                (f'{int(percent)}%' if percent is not None and state=='running' else ''))
+            row.setText(2,f'{int(percent)}%' if percent is not None and state=='running' else '')
             row.setToolTip(1,item.get('message',''))
-        self.queue_panel.setVisible(bool(self.queue.items))
-        if self.queue.items and not self.queue_view.currentItem():
-            current=self.queue.active or self.queue.items[-1]
+        self.queue_panel.setVisible(bool(visible))
+        if visible and not self.queue_view.currentItem():
+            current=self.queue.active if self.queue.active in visible else visible[0]
             self.queue_view.setCurrentItem(self.queue_rows[current['id']])
+        self.queue_view.blockSignals(False)
         self.refresh_queue_actions()
 
     def refresh_queue_actions(self):
@@ -731,10 +808,11 @@ class Window(QWidget):
         source=source_of(item['spec'])
         if source and Path(source).is_file() and not self.queue.owns_source(source):
             self.keep_pending()
-            self.set_source(source)
+            self.set_source(source,show_dialog=False)
             self.filename.setText(item['spec'].get('export_name',Path(source).stem))
             if item['spec'].get('export_folder'):
                 self.folder.setText(item['spec']['export_folder'])
+            self.open_save_dialog()
 
     def retry_job(self):
         item=self.selected_job()

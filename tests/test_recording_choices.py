@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from core import (ensure_dirs, new_note, note_dir, save_note, atomic_json,
                   read_json, save_audio_output, discard_pending)
 import gui
@@ -253,11 +255,84 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         with patch.object(self.window, 'start_job') as start_job:
             self.window.stop()
             rec.stop_event.set.assert_called_once()
+            self.assertFalse(self.window.save_dialog.isVisible())
             self.window.finished_recording()
             start_job.assert_not_called()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        self.assertIs(self.window.save_button.window(), self.window.save_dialog)
         self.assertFalse(self.window.save_panel.isHidden())
         self.assertFalse(self.window.discard_button.isHidden())
         self.assertTrue(self.window.save_button.isEnabled())
+
+    def test_escape_keeps_audio_and_review_restores_save_choices(self):
+        self.window.set_source(str(self.source))
+        self.window.filename.setText('Keep this name')
+        self.window.save_mode.setCurrentIndex(1)
+        QTest.keyClick(self.window.save_dialog, Qt.Key_Escape)
+        self.assertFalse(self.window.save_dialog.isVisible())
+        self.assertTrue(self.source.exists())
+        self.assertEqual(self.window.source, str(self.source))
+        self.assertFalse(self.window.review_button.isHidden())
+        self.window.review_button.click()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        self.assertEqual(self.window.filename.text(), 'Keep this name')
+        self.assertEqual(self.window.save_mode.currentData(), 'save_audio')
+        self.assertEqual(self.window.queue.items, [])
+
+    def test_failed_save_keeps_dialog_then_successful_enqueue_closes_it(self):
+        self.window.set_source(str(self.source))
+        self.window.save_mode.setCurrentIndex(1)
+        self.window.filename.setText('../invalid')
+        with patch.object(QMessageBox, 'warning'):
+            self.window.save_button.click()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        self.assertTrue(self.source.exists())
+        self.window.filename.setText('Saved audio')
+        with patch.object(self.window.queue, 'enqueue', side_effect=OSError('Disk full')), \
+             patch.object(QMessageBox, 'warning'):
+            self.window.save_button.click()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        self.assertTrue(self.source.exists())
+        with patch.object(self.window.queue, 'start_next'):
+            self.window.save_button.click()
+        self.assertFalse(self.window.save_dialog.isVisible())
+        self.assertEqual(self.window.source, '')
+        self.assertTrue(self.window.review_button.isHidden())
+        self.assertTrue(Path(job_queue.source_of(self.window.queue.items[0]['spec'])).is_file())
+
+    def test_import_and_options_work_inside_save_dialog(self):
+        with patch.object(gui.QFileDialog, 'getOpenFileName', return_value=(str(self.source), '')):
+            self.window.import_audio()
+        self.assertTrue(self.window.save_dialog.isVisible())
+        options=gui.Options(self.window)
+        self.assertIs(options.parent(), self.window.save_dialog)
+        options.language.setCurrentIndex(options.language.findData('en'))
+        options.commit()
+        self.assertEqual(self.window.language, 'en')
+        self.assertIn('English', self.window.save_summary.text())
+        self.assertTrue(self.window.save_dialog.isVisible())
+
+    def test_only_successful_tasks_disappear_and_selection_moves_to_waiting_task(self):
+        first=self.window.queue.enqueue(dict(kind='save_audio', source=str(self.source),
+            export_name='First', export_folder=str(self.root/'exports')))
+        second=self.window.queue.enqueue(dict(kind='download',model='large'))
+        first.update(state='running',progress=100)
+        self.window.refresh_queue()
+        self.window.queue_view.setCurrentItem(self.window.queue_rows[first['id']])
+        self.assertEqual(self.window.queue_view.topLevelItemCount(), 2)
+        self.assertEqual(self.window.queue_rows[first['id']].text(2), '100%')
+        first.update(state='complete',result=dict(saved_paths=[str(self.root/'exports'/'First.wav')],
+            warnings=['No speech was recognized.']))
+        self.window.refresh_queue()
+        self.assertEqual(self.window.queue_view.topLevelItemCount(), 1)
+        self.assertIs(self.window.selected_job(), second)
+        self.assertIn('No speech was recognized.', self.window.completion_notice.text())
+        second.update(state='failed',progress=100)
+        self.window.refresh_queue()
+        self.assertEqual(self.window.queue_view.topLevelItemCount(), 1)
+        self.assertTrue(self.window.queue_retry.isEnabled())
+        self.assertTrue(Path(job_queue.source_of(first['spec'])).exists())
+        self.assertTrue((self.window.queue.folder(first)/'job.json').exists())
 
     def test_audio_only_gui_skips_model_checks_and_note_creation(self):
         self.window.set_source(str(self.source))
@@ -284,6 +359,7 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         self.assertEqual(self.window.source, '')
         self.assertFalse(self.window.save_button.isEnabled())
         self.assertTrue(self.window.save_panel.isHidden())
+        self.assertFalse(self.window.save_dialog.isVisible())
 
 
 if __name__ == '__main__':

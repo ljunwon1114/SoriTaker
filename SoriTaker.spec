@@ -33,7 +33,7 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='SoriTaker
 app = BUNDLE(coll, name='SoriTaker.app', bundle_identifier='local.sorinote.desktop',
              icon=str(base / 'assets' / 'SoriTaker.icns'),
              info_plist={
-                 'CFBundleDisplayName': 'SoriTaker', 'CFBundleShortVersionString': '0.4.0',
+                 'CFBundleDisplayName': 'SoriTaker', 'CFBundleShortVersionString': '0.4.1',
                  'NSHighResolutionCapable': True, 'LSMinimumSystemVersion': '14.0',
                  'NSMicrophoneUsageDescription': 'SoriTaker uses your microphone to record audio on this Mac and transcribe it offline.',
                  'NSHumanReadableCopyright': 'SoriTaker. Open-source components retain their respective licenses.',
