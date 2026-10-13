@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 APP_NAME = "SoriTaker"
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 
 def data_home() -> Path:

@@ -68,6 +68,26 @@ class Fixture(unittest.TestCase):
 
 
 class QueueTests(Fixture):
+    def test_remove_one_finished_task_preserves_others_and_never_removes_active_work(self):
+        first=self.queue.enqueue(self.spec('Failed'))
+        first['state']='failed'
+        second=self.queue.enqueue(self.spec('Cancelled'))
+        self.queue.cancel(second)
+        waiting=self.queue.enqueue(self.spec('Waiting'))
+        self.assertFalse(self.queue.dismiss(waiting))
+        waiting['state']='running'
+        self.queue.active=waiting
+        self.assertFalse(self.queue.dismiss(waiting))
+        waiting['state']='cancelling'
+        self.assertFalse(self.queue.dismiss(waiting))
+        self.assertTrue(self.queue.dismiss(first))
+        self.assertFalse(self.queue.dismiss(first))
+        self.assertFalse(second.get('dismissed',False))
+        self.assertFalse(waiting.get('dismissed',False))
+        self.assertTrue(Path(source_of(first['spec'])).is_file())
+        restored=JobQueue(self.root)
+        self.assertEqual({i['id'] for i in restored.items if i.get('dismissed')},{first['id']})
+
     def test_clear_retains_audio_and_receipts_and_persists_across_restart(self):
         cancelled=self.queue.enqueue(self.spec('Cancelled'))
         self.queue.cancel(cancelled)
@@ -316,8 +336,9 @@ class QueueIntegrationTests(Fixture):
                 window.model='large'
                 (self.root/'release-worker').touch()
                 self.wait_for(lambda:first['state']=='complete',window.poll)
-                self.assertNotIn(first['id'],window.queue_rows)
-                self.assertTrue(window.queue_panel.isHidden())
+                self.assertEqual(window.queue_rows[first['id']].text(1),'Complete')
+                self.assertEqual(window.queue_rows[first['id']].text(2),'100%')
+                self.assertFalse(window.queue_panel.isHidden())
                 self.assertIs(window.recording,rec)
                 self.assertEqual(window.state.text(),'PAUSED')
                 self.assertTrue(window.stop_button.isEnabled())
@@ -340,14 +361,22 @@ class QueueIntegrationTests(Fixture):
                 self.assertEqual(audio.getnframes(),32000)
             self.assertTrue((self.root/'exports'/'First.txt').is_file())
             self.assertFalse((self.root/'exports'/'Second.txt').exists())
-            self.assertEqual(window.queue_view.topLevelItemCount(),0)
-            self.assertTrue(window.queue_panel.isHidden())
+            self.assertEqual(window.queue_view.topLevelItemCount(),2)
+            self.assertFalse(window.queue_panel.isHidden())
             self.assertFalse(window.save_dialog.isVisible())
             restored=JobQueue(self.root)
             self.assertEqual([item['state'] for item in restored.items],['complete','complete'])
             window.queue=restored
             window.refresh_queue()
+            self.assertEqual(window.queue_view.topLevelItemCount(),2)
+            window.queue_clear.click()
             self.assertEqual(window.queue_view.topLevelItemCount(),0)
+            self.assertTrue(window.queue_panel.isHidden())
+            window.queue=JobQueue(self.root)
+            window.refresh_queue()
+            self.assertEqual(window.queue_view.topLevelItemCount(),0)
+            self.assertTrue((self.root/'exports'/'First.txt').is_file())
+            self.assertTrue((self.root/'exports'/'Second.wav').is_file())
             self.assertTrue(window.record_button.isEnabled())
         finally:
             if window.recording:

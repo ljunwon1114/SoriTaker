@@ -12,9 +12,9 @@ from PySide6.QtCore import Qt, QTimer, QUrl, QLockFile
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QIcon
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QCheckBox, QSpinBox, QFileDialog, QMessageBox,
-    QDialog, QProgressBar, QFrame, QTreeWidget, QTreeWidgetItem, QHeaderView, QScrollArea)
+    QDialog, QProgressBar, QFrame, QTreeWidget, QTreeWidgetItem, QHeaderView, QScrollArea, QMenu)
 from core import ensure_dirs, atomic_json, read_json, new_note, save_note, timestamp, discard_pending, VERSION
-from models import ready, MODELS
+from models import ready, MODELS, model_dir
 from job_queue import JobQueue, ACTIVE, RETRYABLE, CLEARABLE, source_of
 
 STYLE = '''
@@ -276,7 +276,6 @@ class Window(QWidget):
         self.recording=None
         self.queue=JobQueue(self.root, recover=not demo)
         self.queue_rows={}
-        self.completed_ids=set()
         self.source=''
         self.saved=False
         self.saved_paths=[]
@@ -392,13 +391,18 @@ class Window(QWidget):
         queue_layout.setContentsMargins(0,8,0,0)
         queue_layout.setSpacing(8)
         self.queue_summary=text('QUEUE','state')
-        queue_layout.addWidget(self.queue_summary)
+        queue_header=QHBoxLayout()
+        queue_header.addWidget(self.queue_summary,1)
+        self.queue_clear=button('Clear',self.clear_finished_jobs,'link')
+        self.queue_clear.setToolTip('Remove all complete, failed, cancelled, and interrupted tasks from the list. Files are kept.')
+        queue_header.addWidget(self.queue_clear)
+        queue_layout.addLayout(queue_header)
         self.queue_view=QTreeWidget()
         self.queue_view.setColumnCount(3)
         self.queue_view.setHeaderLabels(['File / task','Status','Progress'])
         self.queue_view.setRootIsDecorated(False)
-        self.queue_view.setMinimumHeight(105)
-        self.queue_view.setMaximumHeight(145)
+        self.queue_view.setMinimumHeight(160)
+        self.queue_view.setMaximumHeight(180)
         self.queue_view.header().setSectionResizeMode(0,QHeaderView.Stretch)
         self.queue_view.header().setSectionResizeMode(1,QHeaderView.ResizeToContents)
         self.queue_view.header().setSectionResizeMode(2,QHeaderView.ResizeToContents)
@@ -408,32 +412,28 @@ class Window(QWidget):
         self.queue_detail.setMinimumHeight(30)
         self.queue_detail.setMaximumHeight(44)
         queue_layout.addWidget(self.queue_detail)
-        self.progress=QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(5)
-        self.progress.setValue(0)
-        queue_layout.addWidget(self.progress)
         actions=QHBoxLayout()
         self.queue_open=button('Open folder',self.open_job_folder,'link')
-        self.queue_audio=button('Save audio…',self.save_job_audio,'link')
-        self.queue_audio.setToolTip('Open the preserved recording with Audio only selected.')
         self.queue_retry=button('Retry',self.retry_job,'link')
         self.cancel_button=button('Cancel task',self.cancel_job,'link')
-        for widget in (self.queue_open,self.queue_audio,self.queue_retry,self.cancel_button):
+        self.queue_remove=button('Remove',self.remove_job,'link')
+        self.queue_remove.setToolTip('Remove only the selected task from the list. Files are kept.')
+        for widget in (self.queue_open,self.queue_retry,self.cancel_button,self.queue_remove):
             actions.addWidget(widget)
         actions.addStretch()
-        self.queue_clear=button('Clear',self.clear_finished_jobs,'link')
-        self.queue_clear.setToolTip('Remove finished, cancelled, and failed tasks from the list. Audio files are kept.')
-        actions.addWidget(self.queue_clear)
+        self.queue_more=button('More…',lambda:None,'link')
+        more_menu=QMenu(self.queue_more)
+        self.queue_audio=more_menu.addAction('Save audio…',self.save_job_audio)
+        self.queue_audio.setToolTip('Open the preserved recording with Audio only selected.')
+        self.queue_logs=more_menu.addAction('Open logs',self.open_job_logs)
+        self.queue_more.setMenu(more_menu)
+        actions.addWidget(self.queue_more)
         queue_layout.addLayout(actions)
         layout.addWidget(self.queue_panel)
         self.queue_panel.hide()
         layout.addStretch(1)
         self.status=text('Press Record, or import an existing audio file.')
         layout.addWidget(self.status)
-        self.completion_notice=text('')
-        self.completion_notice.hide()
-        layout.addWidget(self.completion_notice)
         footer=QHBoxLayout()
         self.import_button=button('Import audio',self.import_audio,'link')
         footer.addWidget(self.import_button)
@@ -721,22 +721,8 @@ class Window(QWidget):
         return next((item for item in self.queue.items if item['id']==key),None)
 
     def refresh_queue(self):
-        # A reported 100% can precede file export. Hide only confirmed successes.
-        completed=[item for item in self.queue.items if item['state']=='complete' and not item.get('dismissed')
-                   and item['id'] not in self.completed_ids]
-        if completed:
-            self.completed_ids.update(item['id'] for item in completed)
-            item=completed[-1]
-            spec=item['spec']
-            result=item.get('result',{})
-            message=('Model ready: '+MODELS[spec['model']]['name'] if spec['kind']=='download' else
-                     'Saved: '+spec['export_name'])
-            if result.get('warnings'):
-                message+=' — '+' / '.join(result['warnings'])
-            self.completion_notice.setText(message)
-            self.completion_notice.setToolTip(message+'\n'+'\n'.join(result.get('saved_paths',[])))
-            self.completion_notice.show()
-        visible=[item for item in self.queue.items if item['state']!='complete' and not item.get('dismissed')]
+        # Completion is confirmed by the worker receipt, not reported progress.
+        visible=[item for item in self.queue.items if not item.get('dismissed')]
         visible_ids={item['id'] for item in visible}
         self.queue_view.blockSignals(True)
         for key in list(self.queue_rows):
@@ -745,7 +731,9 @@ class Window(QWidget):
                 self.queue_view.takeTopLevelItem(self.queue_view.indexOfTopLevelItem(row))
         running=sum(item['state'] in ('running','cancelling') for item in self.queue.items)
         waiting=sum(item['state']=='queued' for item in self.queue.items)
-        self.queue_summary.setText(f'QUEUE  ·  {running} running  ·  {waiting} waiting')
+        finished=sum(item['state'] in CLEARABLE for item in visible)
+        counts=[f'{count} {label}' for count,label in ((running,'processing'),(waiting,'waiting'),(finished,'finished')) if count]
+        self.queue_summary.setText('  ·  '.join(['QUEUE']+counts))
         positions={item['id']:i+1 for i,item in enumerate(item for item in self.queue.items if item['state']=='queued')}
         for item in visible:
             row=self.queue_rows.get(item['id'])
@@ -759,11 +747,12 @@ class Window(QWidget):
             row.setToolTip(0,title)
             state=item['state']
             label={'queued':'Waiting','running':'Processing','cancelling':'Cancelling',
-                   'failed':'Failed','cancelled':'Cancelled','interrupted':'Interrupted'}[state]
+                   'complete':'Complete','failed':'Failed','cancelled':'Cancelled','interrupted':'Interrupted'}[state]
             row.setText(1,f'Waiting #{positions[item["id"]]}' if state=='queued' else label)
             percent=item.get('progress')
-            row.setText(2,f'{int(percent)}%' if percent is not None and state=='running' else '')
-            row.setToolTip(1,item.get('message',''))
+            row.setText(2,'100%' if state=='complete' else
+                        (f'{int(percent)}%' if percent is not None and state=='running' else ''))
+            row.setToolTip(1,self.job_message(item))
         self.queue_panel.setVisible(bool(visible))
         if visible and not self.queue_view.currentItem():
             current=self.queue.active if self.queue.active in visible else visible[0]
@@ -774,29 +763,48 @@ class Window(QWidget):
     def refresh_queue_actions(self):
         item=self.selected_job()
         state=item['state'] if item else ''
-        self.queue_open.setEnabled(bool(item))
+        self.queue_open.setVisible(state=='complete')
+        self.queue_open.setEnabled(state=='complete')
+        self.queue_retry.setVisible(state in RETRYABLE)
         self.queue_retry.setEnabled(state in RETRYABLE)
+        self.cancel_button.setVisible(state in ACTIVE)
         self.cancel_button.setEnabled(state in ('queued','running'))
+        removable=state in CLEARABLE and item is not self.queue.active
+        self.queue_remove.setVisible(removable)
+        self.queue_remove.setEnabled(removable)
         self.queue_clear.setEnabled(any(task['state'] in CLEARABLE and not task.get('dismissed')
                                        and task is not self.queue.active for task in self.queue.items))
+        self.queue_more.setEnabled(bool(item))
+        self.queue_logs.setEnabled(bool(item))
         source=source_of(item['spec']) if item else ''
+        self.queue_audio.setVisible(state in RETRYABLE and bool(source))
         self.queue_audio.setEnabled(state in RETRYABLE and bool(source) and Path(source).is_file() and
                                    not self.recording and not self.queue.owns_source(source))
-        message=item.get('message','') if item else ''
-        if item and item.get('result',{}).get('warnings'):
-            message+=' '+ ' / '.join(item['result']['warnings'])
+        message=self.job_message(item) if item else ''
         self.queue_detail.setText(message)
         self.queue_detail.setToolTip(message)
-        percent=item.get('progress') if item else None
-        self.progress.setRange(0,0 if state in ('running','cancelling') and percent is None else 100)
-        self.progress.setValue(100 if state=='complete' else int(percent or 0))
+
+    def job_message(self,item):
+        result=item.get('result',{})
+        message=(result.get('message') if item['state']=='complete' else '') or item.get('message','')
+        if result.get('warnings'):
+            message+=' — '+' / '.join(result['warnings'])
+        if result.get('saved_paths'):
+            message+='\n'+'\n'.join(result['saved_paths'])
+        return message
 
     def open_job_folder(self):
         item=self.selected_job()
-        if item:
+        if item and item['state']=='complete':
             paths=item.get('result',{}).get('saved_paths',[])
-            folder=Path(paths[0]).parent if paths else self.queue.folder(item)
+            folder=(model_dir(item['spec']['model']) if item['spec']['kind']=='download' else
+                    (Path(paths[0]).parent if paths else Path(item['spec']['export_folder'])))
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def open_job_logs(self):
+        item=self.selected_job()
+        if item:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.queue.folder(item))))
 
     def save_job_audio(self):
         item=self.selected_job()
@@ -816,11 +824,22 @@ class Window(QWidget):
         try:
             count=self.queue.clear_finished()
             if count:
-                self.completion_notice.hide()
                 if not self.recording and not self.source:
-                    self.status.setText('Queue cleared. Audio and saved files are preserved.')
+                    self.status.setText('Finished tasks cleared. Audio and saved files are preserved.')
         except OSError as exc:
             QMessageBox.warning(self,'Could not clear queue',str(exc))
+        finally:
+            self.refresh_queue()
+
+    def remove_job(self):
+        item=self.selected_job()
+        if not item:
+            return
+        try:
+            if self.queue.dismiss(item) and not self.recording and not self.source:
+                self.status.setText('Task removed from the list. Audio and saved files are preserved.')
+        except OSError as exc:
+            QMessageBox.warning(self,'Could not remove task',str(exc))
         finally:
             self.refresh_queue()
 

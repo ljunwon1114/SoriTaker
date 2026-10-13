@@ -312,7 +312,7 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         self.assertIn('English', self.window.save_summary.text())
         self.assertTrue(self.window.save_dialog.isVisible())
 
-    def test_only_successful_tasks_disappear_and_selection_moves_to_waiting_task(self):
+    def test_complete_stays_selected_with_warning_and_clear_keeps_waiting_task(self):
         first=self.window.queue.enqueue(dict(kind='save_audio', source=str(self.source),
             export_name='First', export_folder=str(self.root/'exports')))
         second=self.window.queue.enqueue(dict(kind='download',model='large'))
@@ -321,12 +321,26 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         self.window.queue_view.setCurrentItem(self.window.queue_rows[first['id']])
         self.assertEqual(self.window.queue_view.topLevelItemCount(), 2)
         self.assertEqual(self.window.queue_rows[first['id']].text(2), '100%')
+        self.assertEqual(self.window.queue_rows[first['id']].text(1), 'Processing')
+        self.assertFalse(self.window.queue_clear.isEnabled())
         first.update(state='complete',result=dict(saved_paths=[str(self.root/'exports'/'First.wav')],
-            warnings=['No speech was recognized.']))
+            message='Saved',warnings=['No speech was recognized.']))
         self.window.refresh_queue()
-        self.assertEqual(self.window.queue_view.topLevelItemCount(), 1)
+        self.assertEqual(self.window.queue_view.topLevelItemCount(), 2)
+        self.assertIs(self.window.selected_job(), first)
+        self.assertEqual(self.window.queue_rows[first['id']].text(1), 'Complete')
+        self.assertEqual(self.window.queue_rows[first['id']].text(2), '100%')
+        self.assertIn('No speech was recognized.', self.window.queue_detail.text())
+        self.assertIn('First.wav', self.window.queue_detail.toolTip())
+        self.assertFalse(self.window.queue_open.isHidden())
+        self.assertTrue(self.window.cancel_button.isHidden())
+        self.assertTrue(self.window.queue_retry.isHidden())
+        with patch.object(gui.QDesktopServices,'openUrl') as open_url:
+            self.window.queue_open.click()
+            self.assertEqual(open_url.call_args.args[0].toLocalFile(),str(self.root/'exports'))
+        self.window.queue_clear.click()
         self.assertIs(self.window.selected_job(), second)
-        self.assertIn('No speech was recognized.', self.window.completion_notice.text())
+        self.assertEqual(self.window.queue_view.topLevelItemCount(), 1)
         second.update(state='failed',progress=100)
         self.window.refresh_queue()
         self.assertEqual(self.window.queue_view.topLevelItemCount(), 1)
@@ -352,7 +366,7 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         waiting=self.window.queue.enqueue(dict(kind='download',model='large'))
         self.window.refresh_queue()
         self.window.queue_view.setCurrentItem(self.window.queue_rows[cancelled['id']])
-        self.window.queue_audio.click()
+        self.window.queue_audio.trigger()
         self.assertTrue(self.window.save_dialog.isVisible())
         self.assertEqual(self.window.save_mode.currentData(),'save_audio')
         self.assertEqual(self.window.filename.text(),'Keep audio')
@@ -377,6 +391,39 @@ class RecordingChoiceGUITests(RecordingChoiceFixture, unittest.TestCase):
         self.window.queue_clear.click()
         self.assertEqual(self.window.queue_view.topLevelItemCount(),0)
         self.assertTrue(self.window.queue_panel.isHidden())
+
+    def test_remove_failed_task_without_source_keeps_other_rows_and_survives_restart(self):
+        failed=self.window.queue.enqueue(dict(kind='save_audio',source=str(self.source),
+            export_name='Missing source',export_folder=str(self.root/'exports')))
+        failed.update(state='failed',message='The audio file is missing.')
+        self.window.queue.persist(failed)
+        Path(job_queue.source_of(failed['spec'])).unlink()
+        waiting=self.window.queue.enqueue(dict(kind='download',model='large'))
+        self.window.refresh_queue()
+        self.window.queue_view.setCurrentItem(self.window.queue_rows[failed['id']])
+        self.assertFalse(self.window.queue_remove.isHidden())
+        self.assertTrue(self.window.queue_remove.isEnabled())
+        self.assertFalse(self.window.queue_retry.isHidden())
+        self.assertTrue(self.window.cancel_button.isHidden())
+        self.assertTrue(self.window.queue_open.isHidden())
+        self.assertFalse(self.window.queue_audio.isEnabled())
+        with patch.object(gui.QDesktopServices,'openUrl') as open_url:
+            self.window.queue_logs.trigger()
+            self.assertEqual(open_url.call_args.args[0].toLocalFile(),str(self.window.queue.folder(failed)))
+        with patch.object(self.window.queue,'persist',side_effect=OSError('Disk full')), \
+             patch.object(QMessageBox,'warning') as warning:
+            self.window.queue_remove.click()
+        warning.assert_called_once()
+        self.assertIs(self.window.selected_job(),failed)
+        self.window.queue_remove.click()
+        self.assertIs(self.window.selected_job(),waiting)
+        self.assertTrue(self.window.queue_remove.isHidden())
+        self.assertFalse(self.window.cancel_button.isHidden())
+        self.assertTrue(self.window.cancel_button.isEnabled())
+        self.assertTrue((self.window.queue.folder(failed)/'job.json').is_file())
+        self.window.queue=job_queue.JobQueue(self.root)
+        self.window.refresh_queue()
+        self.assertEqual(set(self.window.queue_rows),{waiting['id']})
 
     def test_discard_cancel_preserves_then_confirm_deletes_pending_work(self):
         folder, job = self.partial_attempt(self.source)

@@ -233,16 +233,18 @@ class JobQueue:
         self.items.remove(item)
         self.items.append(item)
 
+    def dismiss(self, item):
+        """Remove a finished row from the list without deleting its files."""
+        if (not any(task is item for task in self.items) or item is self.active or
+                item['state'] not in CLEARABLE or item.get('dismissed')):
+            return False
+        self.persist(dict(item, dismissed=True))
+        item['dismissed'] = True
+        return True
+
     def clear_finished(self):
         """Dismiss finished rows durably; retain audio, logs, and export receipts."""
-        count = 0
-        for item in self.items:
-            if item['state'] in CLEARABLE and not item.get('dismissed') and item is not self.active:
-                updated = dict(item, dismissed=True)
-                self.persist(updated)
-                item['dismissed'] = True
-                count += 1
-        return count
+        return sum(self.dismiss(item) for item in self.items)
 
     def shutdown(self):
         self.stopping = True
